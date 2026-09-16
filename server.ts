@@ -39,7 +39,7 @@ async function extractAudio(inputVideoPath: string, outputAudioPath: string): Pr
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
 
   // Initialize Gemini API with latest SDK pattern
   const ai = new GoogleGenAI({ 
