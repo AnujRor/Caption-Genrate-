@@ -26,6 +26,10 @@ export function repairWords(raw: Word[]): Word[] {
     let start = Math.max(w.start, lastEnd);
     let end = w.end;
     if (end - start < 0.08) end = start + 0.12;
+    // Speech models often stretch the word before a pause across the silence;
+    // cap it at a realistic spoken length so captions don't linger during pauses.
+    const maxSpoken = Math.max(0.5, 0.08 * w.word.length + 0.3);
+    if (end - start > maxSpoken) end = start + maxSpoken;
     lastEnd = end;
     out.push({ word: w.word, start: +start.toFixed(3), end: +end.toFixed(3) });
   }
