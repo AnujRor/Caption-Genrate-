@@ -1,149 +1,262 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Project } from '../types';
+import { Project, DEFAULT_STYLES } from '../types';
 import { getProjects, saveProject, deleteProject } from '../lib/db';
-import { Plus, Video, Trash2, Clock, Upload } from 'lucide-react';
-import { formatTime } from '../lib/utils';
+import { Plus, Film, Trash2, UploadCloud, Sparkles, Languages, Download, Loader2, AlertTriangle, Captions } from 'lucide-react';
+import { cn, formatDuration, readVideoInfo } from '../lib/utils';
 
 interface ProjectListProps {
   onSelectProject: (project: Project) => void;
 }
 
+const MAX_FILE_MB = 1024;
+
 export default function ProjectList({ onSelectProject }: ProjectListProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isImporting, setIsImporting] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [serverWarning, setServerWarning] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadProjects();
+    fetch('/api/health')
+      .then((r) => r.json())
+      .then((h) => {
+        if (h?.engines && !h.engines.groq && !h.engines.gemini) {
+          setServerWarning('No AI key is configured on the server yet, so caption generation will not work. Add GROQ_API_KEY or GEMINI_API_KEY in your hosting environment variables.');
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const loadProjects = async () => {
     try {
-      const data = await getProjects();
-      setProjects(data);
-    } catch (error) {
-      console.error('Failed to load projects:', error);
+      setProjects(await getProjects());
+    } catch (err) {
+      console.error('Failed to load projects:', err);
+      setError('Could not open local storage. Private/incognito mode may block saving projects.');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const importFile = async (file: File | undefined) => {
+    if (!file || isImporting) return;
+    setError(null);
+    if (!file.type.startsWith('video/') && !/\.(mp4|mov|webm|mkv|m4v)$/i.test(file.name)) {
+      setError('Please choose a video file (MP4, MOV, WEBM).');
+      return;
+    }
+    if (file.size > MAX_FILE_MB * 1024 * 1024) {
+      setError(`This video is larger than ${MAX_FILE_MB}MB. Please trim or compress it first.`);
+      return;
+    }
 
-    const newProject: Project = {
-      id: crypto.randomUUID(),
-      name: file.name.replace(/\.[^/.]+$/, ""),
-      videoBlob: file,
-      phrases: [],
-      styles: {
-        fontFamily: "'Montserrat', sans-serif",
-        fontSize: 42,
-        textColor: '#ffffff',
-        highlightColor: '#facc15', // Vibrant Gold
-        strokeColor: '#000000',
-        strokeWidth: 3,
-        positionY: 72,
-        syncOffset: 0,
-        displayMode: 'single-word', // 1-Word Pop by default
-        animationStyle: 'pop',
-      },
-      createdAt: Date.now(),
-    };
-
+    setIsImporting(true);
     try {
-      await saveProject(newProject);
-      await loadProjects();
-      onSelectProject(newProject);
-    } catch (error) {
-      console.error('Failed to save project:', error);
-      alert('Failed to save project. Ensure you have enough storage space.');
+      const info = await readVideoInfo(file);
+      const project: Project = {
+        id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+        name: file.name.replace(/\.[^/.]+$/, '') || 'Untitled video',
+        videoBlob: file,
+        phrases: [],
+        styles: { ...DEFAULT_STYLES },
+        thumbnail: info.thumbnail,
+        duration: info.duration,
+        createdAt: Date.now(),
+      };
+      await saveProject(project);
+      onSelectProject(project);
+    } catch (err) {
+      console.error('Failed to save project:', err);
+      setError('Could not save this video in the browser. Free up some storage space and try again.');
+    } finally {
+      setIsImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
-    e.preventDefault();
     e.stopPropagation();
-    if (true) {
+    if (confirmDelete !== id) {
+      setConfirmDelete(id);
+      setTimeout(() => setConfirmDelete((c) => (c === id ? null : c)), 3000);
+      return;
+    }
+    setConfirmDelete(null);
+    setProjects((list) => list.filter((p) => p.id !== id));
+    try {
       await deleteProject(id);
-      await loadProjects();
+    } catch {
+      loadProjects();
     }
   };
 
+  const openPicker = () => fileInputRef.current?.click();
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 p-8 font-sans">
-      <div className="max-w-5xl mx-auto">
-        <header className="mb-12 flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold mb-2 tracking-tight">AutoCaption <span className="text-slate-500 font-normal">Pro</span></h1>
-            <p className="text-slate-400">Generate AI captions for your videos instantly.</p>
+    <div
+      className="min-h-full bg-aurora"
+      onDragOver={(e) => {
+        e.preventDefault();
+        setIsDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setIsDragging(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        importFile(e.dataTransfer.files?.[0]);
+      }}
+    >
+      <input type="file" accept="video/*" className="hidden" ref={fileInputRef} onChange={(e) => importFile(e.target.files?.[0])} />
+
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 pb-16">
+        <header className="flex items-center justify-between py-5">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 flex items-center justify-center shadow-lg shadow-violet-600/30">
+              <Captions size={18} className="text-white" />
+            </div>
+            <span className="font-display font-extrabold text-lg tracking-tight">AutoCaption<span className="text-violet-400"> Studio</span></span>
           </div>
-          <button 
-            onClick={() => fileInputRef.current?.click()}
-            className="bg-indigo-600 hover:bg-indigo-500 text-white transition-colors px-6 py-3 rounded-md font-medium flex items-center gap-2 shadow-lg shadow-indigo-600/20"
-          >
-            <Plus size={20} />
-            New Project
+          <button onClick={openPicker} disabled={isImporting} className="btn-primary px-4 py-2.5 text-sm">
+            {isImporting ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
+            <span className="hidden sm:inline">New project</span>
           </button>
-          <input 
-            type="file" 
-            accept="video/*" 
-            className="hidden" 
-            ref={fileInputRef}
-            onChange={handleFileUpload}
-          />
         </header>
 
-        {isLoading ? (
-          <div className="flex items-center justify-center py-20 text-slate-500">
-            Loading your projects...
+        <section className="pt-8 sm:pt-14 pb-10 text-center animate-fadeUp">
+          <div className="inline-flex items-center gap-1.5 text-[11px] font-medium text-violet-300 bg-violet-500/10 border border-violet-500/20 rounded-full px-3 py-1 mb-5">
+            <Sparkles size={12} /> Free AI captions · Hindi, Hinglish, English & 25+ languages
           </div>
-        ) : projects.length === 0 ? (
-          <div className="text-center py-32 border-2 border-dashed border-slate-800 rounded-xl bg-slate-900/20">
-            <div className="w-16 h-16 bg-slate-900 rounded-full flex items-center justify-center mx-auto mb-6 text-slate-500">
-              <Upload size={32} />
-            </div>
-            <h3 className="text-xl font-semibold mb-2">No projects yet</h3>
-            <p className="text-slate-500 mb-8 max-w-sm mx-auto">Upload a video to start generating stylish captions powered by AI.</p>
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="bg-indigo-600 hover:bg-indigo-500 text-white transition-colors px-6 py-3 rounded-md font-medium shadow-lg shadow-indigo-600/20"
-            >
-              Upload Video
-            </button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {projects.map((project) => (
-              <div 
-                key={project.id}
-                onClick={() => onSelectProject(project)}
-                className="group relative bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-600 transition-all cursor-pointer shadow-lg hover:shadow-xl hover:-translate-y-1"
-              >
-                <div className="aspect-video bg-black relative flex items-center justify-center">
-                  <Video size={48} className="text-slate-800" />
-                  <div className="absolute inset-0 bg-gradient-to-t from-slate-900 to-transparent opacity-80" />
-                </div>
-                <div className="p-5 relative">
-                  <h3 className="font-semibold text-lg mb-1 truncate pr-8 text-slate-200">{project.name}</h3>
-                  <div className="flex items-center gap-2 text-sm text-slate-500">
-                    <Clock size={14} />
-                    <span>{new Date(project.createdAt).toLocaleDateString()}</span>
-                  </div>
-                  
-                  <button 
-                    onClick={(e) => handleDelete(e, project.id)}
-                    className="absolute right-4 top-5 p-2 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-md transition-colors"
-                    title="Delete project"
-                  >
-                    <Trash2 size={18} />
-                  </button>
-                </div>
-              </div>
-            ))}
+          <h1 className="font-display font-black text-3xl sm:text-5xl tracking-tight leading-[1.1]">
+            Viral-style captions,<br />
+            <span className="text-gradient">perfectly synced to your voice.</span>
+          </h1>
+          <p className="mt-4 text-sm sm:text-base text-zinc-400 max-w-xl mx-auto">
+            Upload a video, get word-by-word animated subtitles in seconds, style them, and export a ready-to-post video.
+          </p>
+        </section>
+
+        {serverWarning && (
+          <div className="mb-6 flex gap-3 items-start rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
+            <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+            <p>{serverWarning}</p>
           </div>
         )}
+
+        {error && (
+          <div className="mb-6 flex gap-3 items-start rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200 animate-fadeUp">
+            <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+            <p className="flex-1">{error}</p>
+            <button onClick={() => setError(null)} className="text-rose-300 hover:text-white text-xs">Dismiss</button>
+          </div>
+        )}
+
+        <button
+          onClick={openPicker}
+          disabled={isImporting}
+          className={cn(
+            'group w-full rounded-2xl border-2 border-dashed transition-all duration-200 py-12 sm:py-16 px-6 flex flex-col items-center gap-4',
+            isDragging
+              ? 'border-violet-400 bg-violet-500/10 scale-[1.01]'
+              : 'border-white/10 bg-white/[0.02] hover:border-violet-500/50 hover:bg-violet-500/[0.04]'
+          )}
+        >
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-600/20 to-fuchsia-600/20 border border-violet-500/30 flex items-center justify-center text-violet-300 group-hover:scale-110 transition-transform">
+            {isImporting ? <Loader2 size={28} className="animate-spin" /> : <UploadCloud size={28} />}
+          </div>
+          <div>
+            <p className="font-semibold text-base sm:text-lg">{isImporting ? 'Preparing your video…' : isDragging ? 'Drop it here' : 'Drop a video or click to upload'}</p>
+            <p className="text-xs text-zinc-500 mt-1">MP4, MOV or WEBM · Reels, Shorts, landscape — any size up to {MAX_FILE_MB}MB</p>
+          </div>
+        </button>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
+          {[
+            { icon: Sparkles, title: 'Accurate AI timing', text: 'Whisper + Gemini word-level sync' },
+            { icon: Languages, title: '25+ languages', text: 'Hindi, Hinglish, Punjabi, Tamil…' },
+            { icon: Download, title: 'Export video + SRT', text: 'Burned-in captions in full quality' },
+          ].map(({ icon: Icon, title, text }) => (
+            <div key={title} className="panel p-4 flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-white/5 flex items-center justify-center text-violet-300 shrink-0">
+                <Icon size={17} />
+              </div>
+              <div>
+                <p className="text-sm font-semibold">{title}</p>
+                <p className="text-xs text-zinc-500">{text}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <section className="mt-12">
+          <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-4">Your projects</h2>
+          {isLoading ? (
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="panel aspect-[4/5] shimmer" />
+              ))}
+            </div>
+          ) : projects.length === 0 ? (
+            <div className="panel py-12 text-center text-sm text-zinc-500">
+              <Film size={28} className="mx-auto mb-3 text-zinc-600" />
+              No projects yet — your uploaded videos will appear here.
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {projects.map((project, i) => (
+                <div
+                  key={project.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onSelectProject(project)}
+                  onKeyDown={(e) => e.key === 'Enter' && onSelectProject(project)}
+                  style={{ animationDelay: `${Math.min(i, 8) * 40}ms` }}
+                  className="group relative panel overflow-hidden cursor-pointer transition-all duration-200 hover:-translate-y-1 hover:border-violet-500/40 hover:shadow-xl hover:shadow-violet-900/20 animate-fadeUp"
+                >
+                  <div className="aspect-video bg-black/60 relative overflow-hidden">
+                    {project.thumbnail ? (
+                      <img src={project.thumbnail} alt="" className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-zinc-700">
+                        <Film size={32} />
+                      </div>
+                    )}
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
+                    {project.duration ? (
+                      <span className="absolute bottom-2 right-2 text-[10px] font-mono bg-black/70 px-1.5 py-0.5 rounded">{formatDuration(project.duration)}</span>
+                    ) : null}
+                    {project.phrases.length > 0 && (
+                      <span className="absolute bottom-2 left-2 text-[10px] font-semibold bg-emerald-500/90 text-black px-1.5 py-0.5 rounded">Captioned</span>
+                    )}
+                  </div>
+                  <div className="p-3 pr-10">
+                    <h3 className="font-medium text-sm truncate">{project.name}</h3>
+                    <p className="text-[11px] text-zinc-500 mt-0.5">{new Date(project.updatedAt || project.createdAt).toLocaleDateString()}</p>
+                  </div>
+                  <button
+                    onClick={(e) => handleDelete(e, project.id)}
+                    className={cn(
+                      'absolute right-2 bottom-2.5 p-1.5 rounded-lg transition-all text-xs flex items-center gap-1',
+                      confirmDelete === project.id
+                        ? 'bg-rose-500 text-white'
+                        : 'text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10'
+                    )}
+                    title="Delete project"
+                  >
+                    <Trash2 size={14} />
+                    {confirmDelete === project.id && <span className="pr-0.5">Sure?</span>}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       </div>
     </div>
   );

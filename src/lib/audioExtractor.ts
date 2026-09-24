@@ -1,103 +1,71 @@
-// Ultra-fast audio extraction: avoids heavy in-browser audio decoding for large video files
-export async function extractAudioFromBlob(videoBlob: Blob): Promise<{ blob: Blob; mimeType: string }> {
-  // 1. If it is already an audio blob, return immediately in 0ms
-  if (videoBlob.type && videoBlob.type.startsWith('audio/')) {
-    return { blob: videoBlob, mimeType: videoBlob.type };
-  }
+// Decoding audio in the browser keeps uploads tiny (16kHz mono WAV ≈ 1.9MB/min),
+// but full decode holds the whole track in memory, so only do it for clips that
+// are short enough to be safe on phones. Longer videos go to the server as-is,
+// where ffmpeg extracts the audio.
+const SAFE_DECODE_SECONDS = 180;
+const LARGE_FILE_DECODE_SECONDS = 900;
+const LARGE_FILE_BYTES = 200 * 1024 * 1024;
 
-  // 2. For video files, sending directly to the server is 20x faster because
-  // server-side ffmpeg extracts pure audio in ~150ms without freezing the browser's JS thread.
-  if (videoBlob.size > 1.5 * 1024 * 1024) {
-    return { blob: videoBlob, mimeType: videoBlob.type || 'video/mp4' };
-  }
+export async function prepareUpload(
+  media: Blob,
+  durationSec?: number
+): Promise<{ blob: Blob; filename: string }> {
+  const ext = media.type.includes('webm') ? 'webm' : media.type.includes('quicktime') ? 'mov' : 'mp4';
+  const original = { blob: media, filename: `upload.${ext}` };
 
-  // 3. For small clips (<1.5MB), fast client extraction
+  if (media.type.startsWith('audio/')) {
+    const audioExt = media.type.split('/')[1]?.split(';')[0].replace('mpeg', 'mp3') || 'mp3';
+    return { blob: media, filename: `upload_audio.${audioExt}` };
+  }
+  if (media.size < 4 * 1024 * 1024) return original; // already small
+
+  const limit = media.size > LARGE_FILE_BYTES ? LARGE_FILE_DECODE_SECONDS : SAFE_DECODE_SECONDS;
+  if (!durationSec || durationSec > limit) return original;
+
+  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+  if (!AudioCtx || typeof OfflineAudioContext === 'undefined') return original;
+
+  let ctx: AudioContext | null = null;
   try {
-    const arrayBuffer = await videoBlob.arrayBuffer();
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContextClass) {
-      return { blob: videoBlob, mimeType: videoBlob.type || 'video/mp4' };
-    }
-
-    const audioCtx = new AudioContextClass();
-    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    
-    const targetSampleRate = 16000;
-    const duration = audioBuffer.duration;
-    const offlineCtx = new OfflineAudioContext(1, Math.ceil(duration * targetSampleRate), targetSampleRate);
-    
-    const source = offlineCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(offlineCtx.destination);
-    source.start(0);
-    
-    const renderedBuffer = await offlineCtx.startRendering();
-    const wavBlob = audioBufferToWavBlob(renderedBuffer);
-    
-    if (audioCtx.state !== 'closed') {
-      audioCtx.close();
-    }
-
-    return { blob: wavBlob, mimeType: 'audio/wav' };
-  } catch (err) {
-    return { blob: videoBlob, mimeType: videoBlob.type || 'video/mp4' };
+    ctx = new AudioCtx();
+    const decoded = await ctx.decodeAudioData(await media.arrayBuffer());
+    const rate = 16000;
+    const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration * rate), rate);
+    const src = offline.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    return { blob: encodeWav(rendered), filename: 'upload_audio.wav' };
+  } catch {
+    return original;
+  } finally {
+    ctx?.close().catch(() => {});
   }
 }
 
-function audioBufferToWavBlob(buffer: AudioBuffer): Blob {
-  const numOfChan = buffer.numberOfChannels;
-  const sampleRate = buffer.sampleRate;
-  const format = 1; // PCM
-  const bitDepth = 16;
-  const bytesPerSample = bitDepth / 8;
-  const blockAlign = numOfChan * bytesPerSample;
-  const dataByteCount = buffer.length * blockAlign;
-  const headerByteCount = 44;
-  const totalLength = headerByteCount + dataByteCount;
-
-  const arrayBuffer = new ArrayBuffer(totalLength);
-  const view = new DataView(arrayBuffer);
-
-  function writeString(offset: number, string: string) {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
-    }
+function encodeWav(buffer: AudioBuffer): Blob {
+  const samples = buffer.getChannelData(0);
+  const view = new DataView(new ArrayBuffer(44 + samples.length * 2));
+  const writeStr = (o: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, buffer.sampleRate, true);
+  view.setUint32(28, buffer.sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  for (let i = 0, o = 44; i < samples.length; i++, o += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
   }
-
-  // RIFF chunk descriptor
-  writeString(0, 'RIFF');
-  view.setUint32(4, totalLength - 8, true);
-  writeString(8, 'WAVE');
-
-  // fmt sub-chunk
-  writeString(12, 'fmt ');
-  view.setUint32(16, 16, true); // SubChunk1Size (16 for PCM)
-  view.setUint16(20, format, true); // AudioFormat (1 for PCM)
-  view.setUint16(22, numOfChan, true); // NumChannels
-  view.setUint32(24, sampleRate, true); // SampleRate
-  view.setUint32(28, sampleRate * blockAlign, true); // ByteRate
-  view.setUint16(32, blockAlign, true); // BlockAlign
-  view.setUint16(34, bitDepth, true); // BitsPerSample
-
-  // data sub-chunk
-  writeString(36, 'data');
-  view.setUint32(40, dataByteCount, true);
-
-  // Write PCM audio data
-  let offset = 44;
-  const channelData: Float32Array[] = [];
-  for (let i = 0; i < numOfChan; i++) {
-    channelData.push(buffer.getChannelData(i));
-  }
-
-  for (let i = 0; i < buffer.length; i++) {
-    for (let channel = 0; channel < numOfChan; channel++) {
-      const sample = Math.max(-1, Math.min(1, channelData[channel][i]));
-      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-      view.setInt16(offset, intSample, true);
-      offset += 2;
-    }
-  }
-
   return new Blob([view], { type: 'audio/wav' });
 }

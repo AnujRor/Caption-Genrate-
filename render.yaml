@@ -2,6 +2,9 @@ services:
   - type: web
     name: caption-generator
     runtime: docker
+    healthCheckPath: /api/health
     envVars:
+      - key: GROQ_API_KEY
+        sync: false
       - key: GEMINI_API_KEY
         sync: false

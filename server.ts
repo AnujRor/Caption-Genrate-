@@ -1,383 +1,398 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
-import multer from "multer";
+import os from "os";
 import fs from "fs";
-import { exec } from "child_process";
+import multer from "multer";
+import { execFile } from "child_process";
 import util from "util";
 import { GoogleGenAI, Type } from "@google/genai";
-import { createServer as createViteServer } from "vite";
 
-const execPromise = util.promisify(exec);
+const execFileAsync = util.promisify(execFile);
 
-const uploadDir = "/tmp/uploads/";
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+const MAX_UPLOAD_MB = 250;
+const GROQ_MAX_BYTES = 25 * 1024 * 1024; // Groq free-tier file limit
+const GEMINI_INLINE_MAX_BYTES = 18 * 1024 * 1024; // keep under 20MB request cap
+
+const uploadDir = path.join(os.tmpdir(), "caption-uploads");
+fs.mkdirSync(uploadDir, { recursive: true });
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname).replace(/[^.\w]/g, "") || ".bin";
+      cb(null, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`);
+    },
+  }),
+  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 },
+});
+
+const GEMINI_KEY = process.env.GEMINI_API_KEY?.trim() || "";
+const GROQ_KEY = process.env.GROQ_API_KEY?.trim() || "";
+const ai = GEMINI_KEY ? new GoogleGenAI({ apiKey: GEMINI_KEY }) : null;
+
+interface Word {
+  word: string;
+  start: number;
+  end: number;
+}
+interface TranscribeResult {
+  detectedLanguage: string;
+  words: Word[];
+  engine: string;
 }
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || (file.mimetype.includes("wav") ? ".wav" : file.mimetype.includes("audio") ? ".mp3" : ".mp4");
-    cb(null, `${Date.now()}_${Math.random().toString(36).substring(2, 8)}${ext}`);
-  }
-});
-const upload = multer({ storage });
+// Maps UI language names to ISO-639-1 codes supported by Whisper.
+const WHISPER_LANG: Record<string, string> = {
+  Hindi: "hi", Haryanvi: "hi", Bhojpuri: "hi", English: "en", Punjabi: "pa",
+  Marathi: "mr", Gujarati: "gu", Bengali: "bn", Urdu: "ur", Tamil: "ta",
+  Telugu: "te", Kannada: "kn", Malayalam: "ml", Assamese: "as", Arabic: "ar",
+  Spanish: "es", French: "fr", German: "de", Russian: "ru", Japanese: "ja",
+  Korean: "ko", Chinese: "zh", Portuguese: "pt", Italian: "it", Turkish: "tr",
+};
 
-// Helper to extract crisp audio from video using ffmpeg at ultra-high speed
-async function extractAudio(inputVideoPath: string, outputAudioPath: string): Promise<boolean> {
+function safeUnlink(p: string | null | undefined) {
+  if (!p) return;
+  fs.promises.unlink(p).catch(() => {});
+}
+
+async function probeDuration(file: string): Promise<number | null> {
   try {
-    await execPromise(`ffmpeg -y -i "${inputVideoPath}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "${outputAudioPath}"`);
-    if (fs.existsSync(outputAudioPath) && fs.statSync(outputAudioPath).size > 200) {
-      return true;
-    }
-    return false;
-  } catch (err) {
-    console.warn("FFmpeg audio extraction failed or no audio stream:", err);
-    return false;
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file,
+    ]);
+    const d = parseFloat(stdout.trim());
+    return Number.isFinite(d) && d > 0 ? d : null;
+  } catch {
+    return null;
   }
+}
+
+// Compress any audio/video into small mono 16kHz MP3: fast upload, same speech accuracy.
+async function toSpeechMp3(input: string): Promise<string | null> {
+  const out = `${input}_speech.mp3`;
+  try {
+    await execFileAsync(
+      "ffmpeg",
+      ["-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", out],
+      { timeout: 5 * 60 * 1000 }
+    );
+    if (fs.existsSync(out) && fs.statSync(out).size > 500) return out;
+  } catch (err) {
+    console.warn("[ffmpeg] audio extraction failed:", (err as Error).message.split("\n")[0]);
+  }
+  safeUnlink(out);
+  return null;
+}
+
+function mimeFor(file: string, fallback: string): string {
+  const ext = path.extname(file).toLowerCase();
+  const map: Record<string, string> = {
+    ".mp3": "audio/mp3", ".wav": "audio/wav", ".m4a": "audio/mp4", ".ogg": "audio/ogg",
+    ".webm": "video/webm", ".mp4": "video/mp4", ".mov": "video/quicktime",
+  };
+  return map[ext] || fallback || "application/octet-stream";
+}
+
+function normalizeWords(list: any[], duration: number | null): Word[] {
+  const words: Word[] = [];
+  for (const item of list || []) {
+    const text = String(item?.word ?? item?.text ?? "").trim();
+    if (!text) continue;
+    let start = Number(item.start);
+    let end = Number(item.end);
+    if (!Number.isFinite(start)) continue;
+    if (!Number.isFinite(end) || end <= start) end = start + 0.25;
+    if (duration) {
+      if (start > duration + 0.5) continue;
+      end = Math.min(end, duration + 0.1);
+    }
+    words.push({ word: text, start: +start.toFixed(3), end: +end.toFixed(3) });
+  }
+  return words;
+}
+
+// ---------- Groq Whisper (free tier, precise word timestamps) ----------
+async function transcribeWithGroq(file: string, language: string): Promise<TranscribeResult> {
+  const buf = await fs.promises.readFile(file);
+  const form = new FormData();
+  form.append("file", new Blob([buf], { type: mimeFor(file, "audio/mp3") }), path.basename(file));
+  form.append("model", "whisper-large-v3");
+  form.append("response_format", "verbose_json");
+  form.append("timestamp_granularities[]", "word");
+  form.append("timestamp_granularities[]", "segment");
+  form.append("temperature", "0");
+
+  const iso = WHISPER_LANG[language];
+  if (iso) form.append("language", iso);
+  if (language === "Hinglish") {
+    // Roman-script prompt nudges Whisper to write Hindi words in English letters.
+    form.append("prompt", "Haan bhai, aaj hum baat karenge. Video ko like aur share karo, channel ko subscribe karo.");
+  }
+
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${GROQ_KEY}` },
+      body: form,
+    });
+    if (res.ok) {
+      const data: any = await res.json();
+      // Drop words that fall inside segments Whisper itself marks as "probably not speech"
+      // (this removes classic hallucinations like "Thanks for watching" over silence).
+      const badSegments = (data.segments || []).filter(
+        (s: any) => s.no_speech_prob > 0.6 && s.avg_logprob < -0.8
+      );
+      const rawWords = (data.words || []).filter(
+        (w: any) => !badSegments.some((s: any) => w.start >= s.start - 0.01 && w.end <= s.end + 0.01)
+      );
+      const lang = String(data.language || language || "Auto");
+      return {
+        detectedLanguage: lang.charAt(0).toUpperCase() + lang.slice(1),
+        words: normalizeWords(rawWords, data.duration ?? null),
+        engine: "Groq Whisper large-v3",
+      };
+    }
+    const body = await res.text();
+    lastErr = new Error(`Groq ${res.status}: ${body.slice(0, 200)}`);
+    if (res.status === 429 || res.status >= 500) {
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      continue;
+    }
+    break;
+  }
+  throw lastErr || new Error("Groq transcription failed");
+}
+
+// ---------- Gemini (free tier via AI Studio key) ----------
+let geminiModelCache: string[] | null = null;
+const badGeminiModels = new Set<string>();
+
+async function getGeminiModels(): Promise<string[]> {
+  if (geminiModelCache) return geminiModelCache.filter((m) => !badGeminiModels.has(m));
+  const preferred = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"];
+  const discovered: string[] = [];
+  try {
+    const pager = await ai!.models.list();
+    for await (const m of pager as any) {
+      const name = String(m.name || "").replace(/^models\//, "");
+      const actions: string[] = m.supportedActions || [];
+      if (!/^gemini-[\d.]+-flash(-lite)?$/.test(name)) continue;
+      if (actions.length && !actions.includes("generateContent")) continue;
+      discovered.push(name);
+    }
+  } catch (err) {
+    console.warn("[Gemini] model discovery failed:", (err as Error).message);
+  }
+  // Newest non-lite flash first, then lite variants.
+  discovered.sort((a, b) => {
+    const lite = Number(a.includes("lite")) - Number(b.includes("lite"));
+    if (lite) return lite;
+    return parseFloat(b.split("-")[1]) - parseFloat(a.split("-")[1]);
+  });
+  geminiModelCache = Array.from(new Set([...discovered.slice(0, 2), ...preferred, ...discovered.slice(2)]));
+  console.log("[Gemini] model order:", geminiModelCache.join(", "));
+  return geminiModelCache;
+}
+
+function geminiPrompt(language: string, duration: number | null) {
+  let lang = "Detect the spoken language automatically (Hindi, Hinglish, English, Punjabi, Haryanvi, Bhojpuri, Bengali, Marathi, Gujarati, Urdu, Tamil, Telugu, Kannada, Malayalam, Spanish, Arabic, etc.).";
+  if (language === "Hinglish") {
+    lang = 'Write Hindi speech in Roman/English letters (Hinglish), e.g. "Aap kaise ho", "video ko like karo". English words stay English.';
+  } else if (language && language !== "Auto-detect") {
+    lang = `The speech is in ${language}. Write it verbatim in its native script. Do NOT translate.`;
+  }
+  return `You are a professional subtitle transcription engine.
+Transcribe EVERY spoken word of this audio verbatim, in order, with word-level timestamps.
+
+LANGUAGE: ${lang}
+Never translate. Keep the speaker's original words and script.
+
+TIMING RULES:
+- "start"/"end" are seconds from the beginning of the audio as decimal numbers (e.g. 65.42 means 1 minute 5.42 seconds, NOT 1:05).
+- ${duration ? `The audio is ${duration.toFixed(2)} seconds long; no timestamp may exceed it.` : ""}
+- Do not stretch words across pauses or silence.
+- Timestamps must increase monotonically.
+- Remove punctuation from "word". No speech → empty "words" array.`;
+}
+
+async function transcribeWithGemini(file: string, mime: string, language: string, duration: number | null): Promise<TranscribeResult> {
+  const size = fs.statSync(file).size;
+  let mediaPart: any;
+  let uploadedName: string | null = null;
+
+  if (size <= GEMINI_INLINE_MAX_BYTES) {
+    mediaPart = { inlineData: { mimeType: mime, data: (await fs.promises.readFile(file)).toString("base64") } };
+  } else {
+    let uploaded = await ai!.files.upload({ file, config: { mimeType: mime } });
+    uploadedName = uploaded.name || null;
+    for (let i = 0; i < 60 && uploaded.state === "PROCESSING"; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      uploaded = await ai!.files.get({ name: uploaded.name! });
+    }
+    if (uploaded.state === "FAILED") throw new Error("Gemini could not process the media file");
+    mediaPart = { fileData: { fileUri: uploaded.uri, mimeType: uploaded.mimeType || mime } };
+  }
+
+  const schema = {
+    type: Type.OBJECT,
+    properties: {
+      detectedLanguage: { type: Type.STRING },
+      words: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            word: { type: Type.STRING },
+            start: { type: Type.NUMBER },
+            end: { type: Type.NUMBER },
+          },
+          required: ["word", "start", "end"],
+        },
+      },
+    },
+    required: ["detectedLanguage", "words"],
+  };
+
+  try {
+    let lastErr: any = null;
+    for (const model of await getGeminiModels()) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const response = await ai!.models.generateContent({
+            model,
+            contents: [{ role: "user", parts: [mediaPart, { text: geminiPrompt(language, duration) }] }],
+            config: { temperature: 0, responseMimeType: "application/json", responseSchema: schema },
+          });
+          const text = (response.text || "").replace(/```json|```/gi, "").trim();
+          const parsed = JSON.parse(text || "{}");
+          return {
+            detectedLanguage: parsed.detectedLanguage || language,
+            words: normalizeWords(parsed.words || [], duration),
+            engine: `Gemini ${model}`,
+          };
+        } catch (err: any) {
+          lastErr = err;
+          const msg = String(err?.message || err);
+          if (/404|NOT_FOUND|not found|not supported/i.test(msg)) {
+            badGeminiModels.add(model);
+            break; // try next model
+          }
+          if (/429|503|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|high demand/i.test(msg) && attempt === 0) {
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
+          if (/API key|PERMISSION_DENIED|401|403/i.test(msg)) throw err;
+          break;
+        }
+      }
+    }
+    throw lastErr || new Error("No Gemini model available");
+  } finally {
+    if (uploadedName) ai!.files.delete({ name: uploadedName }).catch(() => {});
+  }
+}
+
+function friendlyError(err: unknown): string {
+  const msg = String((err as any)?.message || err);
+  if (/API key not valid|API_KEY_INVALID|invalid_api_key|401/i.test(msg)) return "The server's AI API key is invalid. Check GEMINI_API_KEY / GROQ_API_KEY in your hosting settings.";
+  if (/429|RESOURCE_EXHAUSTED|rate limit|quota/i.test(msg)) return "Free AI quota is busy right now. Please wait a minute and try again.";
+  if (/503|UNAVAILABLE|overloaded|high demand/i.test(msg)) return "The AI service is overloaded right now. Please try again in a moment.";
+  return "Transcription failed. Please try again.";
 }
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
-  // Initialize Gemini API with latest SDK pattern
-  const ai = new GoogleGenAI({ 
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      }
-    }
+  app.get("/api/health", (_req, res) => {
+    res.json({ ok: true, engines: { groq: !!GROQ_KEY, gemini: !!GEMINI_KEY }, maxUploadMb: MAX_UPLOAD_MB });
   });
 
-  // Body parser
-  app.use(express.json({ limit: "500mb" }));
-  app.use(express.urlencoded({ extended: true, limit: "500mb" }));
-
-  // API Route: Transcribe Audio/Video
-  app.post("/api/transcribe", upload.single('video'), async (req, res) => {
-    let tempFilePath: string | null = null;
-    let audioFilePath: string | null = null;
-    let uploadedFileName: string | null = null;
-
+  app.post("/api/transcribe", upload.single("video"), async (req, res) => {
+    const file = req.file;
+    let speechFile: string | null = null;
     try {
-      const { language, mimeType } = req.body;
-      const file = req.file;
-      
-      if (!file) {
-        return res.status(400).json({ error: "No video file provided." });
+      if (!file) return res.status(400).json({ error: "No media file received." });
+      if (!GROQ_KEY && !GEMINI_KEY) {
+        return res.status(503).json({ error: "No AI key configured on the server. Add GROQ_API_KEY or GEMINI_API_KEY in your hosting environment variables." });
       }
-      
-      tempFilePath = file.path;
-      console.log(`[Transcribe] Received upload: ${tempFilePath} (${mimeType || file.mimetype})`);
 
-      // 1. Determine if file is already audio or needs ffmpeg extraction
-      const isAlreadyAudio = (mimeType && mimeType.startsWith("audio/")) || (file.mimetype && file.mimetype.startsWith("audio/")) || file.originalname.endsWith(".wav") || file.originalname.endsWith(".mp3");
-      let targetUploadFile = tempFilePath;
-      let targetMimeType = mimeType || file.mimetype || "video/mp4";
+      const language = String(req.body.language || "Auto-detect");
+      console.log(`[Transcribe] ${file.originalname} ${(file.size / 1048576).toFixed(1)}MB lang=${language}`);
 
-      if (!isAlreadyAudio) {
-        audioFilePath = `${tempFilePath}_audio.wav`;
-        const hasAudio = await extractAudio(tempFilePath, audioFilePath);
-        if (hasAudio) {
-          targetUploadFile = audioFilePath;
-          targetMimeType = "audio/wav";
-          console.log(`[Transcribe] Extracted pure WAV audio stream: ${audioFilePath} (${Math.round(fs.statSync(audioFilePath).size / 1024)} KB)`);
-        } else {
-          console.log(`[Transcribe] Using raw media file directly: ${targetUploadFile}`);
-        }
+      speechFile = await toSpeechMp3(file.path);
+      const mediaFile = speechFile || file.path;
+      const mediaMime = speechFile ? "audio/mp3" : mimeFor(file.path, file.mimetype);
+      const duration = await probeDuration(mediaFile);
+      const mediaSize = fs.statSync(mediaFile).size;
+
+      // Whisper gives far more precise word timing; Gemini handles Hinglish/Odia better.
+      const groqOk = !!GROQ_KEY && mediaSize <= GROQ_MAX_BYTES;
+      const geminiFirst = language === "Hinglish" || (language !== "Auto-detect" && !WHISPER_LANG[language]);
+      const engines: (() => Promise<TranscribeResult>)[] = [];
+      const groq = () => transcribeWithGroq(mediaFile, language);
+      const gemini = () => transcribeWithGemini(mediaFile, mediaMime, language, duration);
+      if (geminiFirst) {
+        if (ai) engines.push(gemini);
+        if (groqOk) engines.push(groq);
       } else {
-        targetMimeType = targetMimeType.startsWith("audio/") ? targetMimeType : "audio/wav";
-        console.log(`[Transcribe] Received direct audio stream (${targetMimeType})`);
+        if (groqOk) engines.push(groq);
+        if (ai) engines.push(gemini);
+      }
+      if (!engines.length) {
+        return res.status(413).json({ error: "This audio is too long for the configured AI engine. Try a shorter clip." });
       }
 
-      // 2. Transcribe using Gemini with Multi-Tier Resilience & Fallbacks
-      const targetLang = language || "Auto-detect";
-      let langInstruction = `Identify and detect ANY spoken language or dialect automatically (Hindi, Hinglish, English, Punjabi, Haryanvi, Rajasthani, Bhojpuri, Bengali, Marathi, Gujarati, Urdu, Tamil, Telugu, Kannada, Malayalam, Spanish, Arabic, French, German, Russian, Japanese, etc.).`;
-      
-      if (targetLang && targetLang !== "Auto-detect") {
-        if (targetLang.toLowerCase().includes("hinglish")) {
-          langInstruction = `The user selected Hinglish (Hindi spoken words written in Roman/English alphabet, e.g. "Aap kaise ho", "Video ko like karo"). Transcribe verbatim in Roman script.`;
-        } else if (targetLang.toLowerCase().includes("hindi")) {
-          langInstruction = `The user selected Hindi. Transcribe verbatim in Devanagari script (e.g. "नमस्ते दोस्तों", "आज हम बात करेंगे"). DO NOT translate into English.`;
-        } else {
-          langInstruction = `The user selected ${targetLang}. Transcribe verbatim in ${targetLang} using native script. DO NOT translate into English.`;
-        }
-      }
-
-      const prompt = `You are an expert multilingual speech-to-text subtitling engine.
-Listen carefully to the audio track. Accurately detect the spoken language and generate exact word-by-word timestamps matching the vocal audio track.
-
-LANGUAGE DETECTION & SCRIPT RULES:
-1. ${langInstruction}
-2. CRITICAL: Never translate spoken words into English unless the speaker is speaking English. Keep the original uttered words in authentic native script (e.g. Devanagari for Hindi/Haryanvi, Gurmukhi for Punjabi, Bengali for Bangla, etc., or Roman alphabet for Hinglish).
-3. If no speech is present in the audio, return an empty "words" array [].
-
-PRECISE TIMING & PAUSE RULES:
-1. "start": The exact second (decimal e.g. 1.24) when the speaker begins vocalizing the word.
-2. "end": The exact second (decimal e.g. 1.58) when the speaker stops vocalizing the word.
-3. PAUSES & SILENCE: When the speaker takes a breath, pauses, or stops talking, DO NOT extend word durations across the silence. There must be an accurate gap between words.
-4. Clean punctuation marks out of the "word" property.
-
-Return the JSON object conforming to the schema with:
-- "detectedLanguage": The specific detected language name (e.g. "Hindi (हिन्दी)", "Hinglish", "English", "Punjabi (ਪੰਜਾਬੀ)", "Haryanvi", "Bengali", "Spanish", etc.)
-- "words": Array of word objects with { "word": string, "start": number, "end": number }`;
-
-      const responseSchema = {
-        type: Type.OBJECT,
-        properties: {
-          detectedLanguage: {
-            type: Type.STRING,
-            description: "The detected spoken language or dialect name (e.g. Hindi, Hinglish, English, Punjabi, Haryanvi, Marathi, Gujarati, etc.)"
-          },
-          words: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                word: { type: Type.STRING, description: "Single uttered word without punctuation" },
-                start: { type: Type.NUMBER, description: "Start timestamp in seconds" },
-                end: { type: Type.NUMBER, description: "End timestamp in seconds" }
-              },
-              required: ["word", "start", "end"]
-            }
-          }
-        },
-        required: ["detectedLanguage", "words"]
-      };
-
-      let responseText = "";
-      // Verified active official models with robust fallback chain
-      const modelsToTry = [
-        "gemini-3.6-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-flash-latest",
-        "gemini-3.7-flash",
-        "gemini-3.6-pro"
-      ];
-      let transcriptionSuccess = false;
-      let lastModelError: any = null;
-
-      // Tier 1 (Fast & Reliable): Direct Inline Base64 for audio/video media
-      const fileStats = fs.existsSync(targetUploadFile) ? fs.statSync(targetUploadFile) : null;
-      const isUnderInlineLimit = fileStats && fileStats.size < 20 * 1024 * 1024;
-
-      if (isUnderInlineLimit && fs.existsSync(targetUploadFile)) {
+      let lastErr: unknown = null;
+      for (const run of engines) {
         try {
-          console.log(`[Transcribe] Running Tier 1 (Fast Inline Base64): ${Math.round(fileStats.size / 1024)} KB, mime: ${targetMimeType}`);
-          const fileBuffer = fs.readFileSync(targetUploadFile);
-          const base64Data = fileBuffer.toString("base64");
-
-          for (const modelName of modelsToTry) {
-            try {
-              console.log(`[Transcribe] Attempting with model: ${modelName}`);
-              
-              for (let retry = 0; retry < 3; retry++) {
-                try {
-                  const response = await ai.models.generateContent({
-                    model: modelName,
-                    contents: [
-                      {
-                        role: "user",
-                        parts: [
-                          { inlineData: { mimeType: targetMimeType, data: base64Data } },
-                          { text: prompt }
-                        ]
-                      }
-                    ],
-                    config: {
-                      temperature: 0.1,
-                      responseMimeType: "application/json",
-                      responseSchema: responseSchema,
-                    },
-                  });
-                  responseText = response.text || "{}";
-                  if (responseText && responseText.length > 5) {
-                    transcriptionSuccess = true;
-                    console.log(`[Transcribe] Success with model: ${modelName}`);
-                    break;
-                  }
-                } catch (retryErr: any) {
-                  const errMsg = String(retryErr?.message || retryErr);
-                  const isTransient = errMsg.includes("503") || errMsg.includes("UNAVAILABLE") || errMsg.includes("high demand") || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED");
-                  if (isTransient && retry < 2) {
-                    const delay = (retry + 1) * 1500;
-                    console.log(`[Transcribe] Model ${modelName} temporary busy (503/429). Retrying in ${delay}ms...`);
-                    await new Promise(r => setTimeout(r, delay));
-                  } else {
-                    throw retryErr;
-                  }
-                }
-              }
-
-              if (transcriptionSuccess) break;
-            } catch (mErr: any) {
-              console.warn(`[Transcribe] Model ${modelName} failed on inline data (${mErr?.message || mErr}). Trying next model...`);
-              lastModelError = mErr;
-            }
-          }
-        } catch (tier1Err) {
-          console.warn("[Transcribe] Tier 1 inline failed, proceeding to Tier 2 (Files API):", tier1Err);
+          const result = await run();
+          console.log(`[Transcribe] ${result.engine}: ${result.words.length} words (${result.detectedLanguage})`);
+          if (result.words.length === 0 && run !== engines[engines.length - 1]) continue;
+          return res.json(result);
+        } catch (err) {
+          lastErr = err;
+          console.warn("[Transcribe] engine failed:", (err as Error).message?.slice(0, 300));
         }
       }
-
-      // Tier 2: Files API for larger media or if Tier 1 encountered an issue
-      if (!transcriptionSuccess && fs.existsSync(targetUploadFile)) {
-        try {
-          console.log(`[Transcribe] Running Tier 2 (Files API upload)...`);
-          let uploadedFile = await ai.files.upload({
-            file: targetUploadFile,
-            config: { mimeType: targetMimeType },
-          });
-          uploadedFileName = uploadedFile.name;
-          console.log(`[Transcribe] Uploaded to Gemini Files API: ${uploadedFile.name}`);
-
-          let attempts = 0;
-          while (uploadedFile.state === "PROCESSING" && attempts < 20) {
-            attempts++;
-            await new Promise((resolve) => setTimeout(resolve, 800));
-            uploadedFile = await ai.files.get({ name: uploadedFile.name });
-          }
-
-          if (uploadedFile.state === "ACTIVE" || uploadedFile.state === undefined) {
-            for (const modelName of modelsToTry) {
-              try {
-                console.log(`[Transcribe Files API] Attempting with model: ${modelName}`);
-                for (let retry = 0; retry < 3; retry++) {
-                  try {
-                    const response = await ai.models.generateContent({
-                      model: modelName,
-                      contents: [
-                        {
-                          role: "user",
-                          parts: [
-                            { fileData: { fileUri: uploadedFile.uri, mimeType: uploadedFile.mimeType || targetMimeType } },
-                            { text: prompt }
-                          ]
-                        }
-                      ],
-                      config: {
-                        temperature: 0.1,
-                        responseMimeType: "application/json",
-                        responseSchema: responseSchema,
-                      },
-                    });
-                    responseText = response.text || "{}";
-                    if (responseText && responseText.length > 5) {
-                      transcriptionSuccess = true;
-                      console.log(`[Transcribe Files API] Success with ${modelName}`);
-                      break;
-                    }
-                  } catch (retryErr: any) {
-                    const errMsg = String(retryErr?.message || retryErr);
-                    const isTransient = errMsg.includes("503") || errMsg.includes("UNAVAILABLE") || errMsg.includes("high demand") || errMsg.includes("429");
-                    if (isTransient && retry < 2) {
-                      const delay = (retry + 1) * 1500;
-                      console.log(`[Transcribe Files API] Model ${modelName} temporary busy (503/429). Retrying in ${delay}ms...`);
-                      await new Promise(r => setTimeout(r, delay));
-                    } else {
-                      throw retryErr;
-                    }
-                  }
-                }
-
-                if (transcriptionSuccess) break;
-              } catch (mErr: any) {
-                console.warn(`[Transcribe Files API] ${modelName} failed (${mErr?.message || mErr}). Trying next model...`);
-                lastModelError = mErr;
-              }
-            }
-          }
-        } catch (filesApiErr) {
-          console.warn("[Transcribe] Files API attempt failed:", filesApiErr);
-          lastModelError = filesApiErr;
-        }
-      }
-
-      if (!transcriptionSuccess) {
-        throw lastModelError || new Error("Failed to transcribe audio across all available AI models.");
-      }
-
-      // Robust JSON parsing and extraction
-      responseText = responseText.replace(/```json/gi, "").replace(/```/g, "").trim();
-      let parsedData: any = {};
-      
-      try {
-        parsedData = JSON.parse(responseText);
-      } catch (parseErr) {
-        const jsonMatch = responseText.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-        if (jsonMatch) {
-          try {
-            parsedData = JSON.parse(jsonMatch[0]);
-          } catch (nestedErr) {
-            console.error("JSON regex extraction failed:", responseText);
-            parsedData = { detectedLanguage: targetLang, words: [] };
-          }
-        } else {
-          parsedData = { detectedLanguage: targetLang, words: [] };
-        }
-      }
-
-      // Handle if root is array or nested
-      const rawList: any[] = Array.isArray(parsedData) 
-        ? parsedData 
-        : (parsedData.words || parsedData.captions || parsedData.subtitles || parsedData.segments || parsedData.transcript || []);
-      
-      const words = rawList.map((item: any) => {
-        const wordText = String(item.word || item.text || item.token || '').trim();
-        const startSec = typeof item.start === 'number' ? item.start : Number(item.start_time || item.startTime || 0);
-        const endSec = typeof item.end === 'number' ? item.end : Number(item.end_time || item.endTime || (startSec + 0.25));
-        return {
-          word: wordText,
-          start: isNaN(startSec) ? 0 : Number(startSec.toFixed(2)),
-          end: isNaN(endSec) ? Number((startSec + 0.25).toFixed(2)) : Number(endSec.toFixed(2)),
-        };
-      }).filter((w: any) => w.word.length > 0);
-
-      const detectedLanguage = (!Array.isArray(parsedData) && parsedData.detectedLanguage) || targetLang;
-
-      console.log(`[Transcribe] Done! Extracted ${words.length} words. Detected: ${detectedLanguage}`);
-
-      // Cleanup local files
-      if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-      if (audioFilePath && fs.existsSync(audioFilePath)) fs.unlinkSync(audioFilePath);
-
-      // Cleanup Gemini remote file
-      if (uploadedFileName) {
-        try {
-          await ai.files.delete({ name: uploadedFileName });
-        } catch (cleanupError) {
-          console.error("Failed to delete remote file:", cleanupError);
-        }
-      }
-
-      res.json({ detectedLanguage, words });
-    } catch (error) {
-      console.error("[Transcribe Error]:", error);
-      if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-      if (audioFilePath && fs.existsSync(audioFilePath)) fs.unlinkSync(audioFilePath);
-      res.status(500).json({ error: "Failed to transcribe video. " + (error as Error).message });
+      if (lastErr) throw lastErr;
+      return res.json({ detectedLanguage: language, words: [], engine: "none" });
+    } catch (err) {
+      console.error("[Transcribe] error:", err);
+      res.status(502).json({ error: friendlyError(err) });
+    } finally {
+      safeUnlink(file?.path);
+      safeUnlink(speechFile);
     }
   });
 
-  // Vite middleware for development
+  // JSON errors for upload problems instead of HTML stack traces.
+  app.use("/api", (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (err instanceof multer.MulterError) {
+      const msg = err.code === "LIMIT_FILE_SIZE" ? `File too large. Maximum is ${MAX_UPLOAD_MB}MB.` : err.message;
+      return res.status(413).json({ error: msg });
+    }
+    console.error("[API] error:", err);
+    res.status(500).json({ error: "Server error. Please try again." });
+  });
+
+  app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
+
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    app.use(express.static(distPath, { maxAge: "7d", index: false }));
+    app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}  (groq=${!!GROQ_KEY}, gemini=${!!GEMINI_KEY})`);
   });
 }
 
