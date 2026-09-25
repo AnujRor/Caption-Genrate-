@@ -69,6 +69,8 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
         createdAt: Date.now(),
       };
       await saveProject(project);
+      // Ask the browser not to auto-delete stored videos when disk space runs low.
+      navigator.storage?.persist?.().catch(() => {});
       onSelectProject(project);
     } catch (err) {
       console.error('Failed to save project:', err);

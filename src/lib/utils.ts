@@ -5,6 +5,26 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** Per-browser UI preferences. Storage can be blocked (private mode), so failures fall back silently. */
+export function loadPref<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(`pref:${key}`);
+    if (raw === null) return fallback;
+    const value = JSON.parse(raw);
+    return typeof value === typeof fallback ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function savePref(key: string, value: unknown) {
+  try {
+    localStorage.setItem(`pref:${key}`, JSON.stringify(value));
+  } catch {
+    /* ignore */
+  }
+}
+
 export function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
   const mins = Math.floor(seconds / 60);

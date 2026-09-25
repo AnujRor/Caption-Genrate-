@@ -17,9 +17,33 @@ const GEMINI_INLINE_MAX_BYTES = 18 * 1024 * 1024; // keep under 20MB request cap
 const uploadDir = path.join(os.tmpdir(), "caption-uploads");
 fs.mkdirSync(uploadDir, { recursive: true });
 
+// Self-healing: crashed or aborted requests can leave temp files behind; sweep them
+// regularly so the disk never fills up on long-running free-tier hosts.
+function sweepUploads(maxAgeMs = 60 * 60 * 1000) {
+  fs.promises
+    .readdir(uploadDir)
+    .then((names) =>
+      Promise.all(
+        names.map(async (name) => {
+          const p = path.join(uploadDir, name);
+          const st = await fs.promises.stat(p).catch(() => null);
+          if (st && Date.now() - st.mtimeMs > maxAgeMs) await fs.promises.unlink(p).catch(() => {});
+        })
+      )
+    )
+    .catch(() => fs.promises.mkdir(uploadDir, { recursive: true }).catch(() => {}));
+}
+sweepUploads(0);
+setInterval(() => sweepUploads(), 30 * 60 * 1000).unref();
+
+// Never let a stray async error take the whole server down.
+process.on("unhandledRejection", (reason) => console.error("[process] unhandled rejection:", reason));
+process.on("uncaughtException", (err) => console.error("[process] uncaught exception:", err));
+
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, uploadDir),
+    // Recreate the folder if the OS cleaned the temp dir while the server was running.
+    destination: (_req, _file, cb) => fs.mkdir(uploadDir, { recursive: true }, (err) => cb(err, uploadDir)),
     filename: (_req, file, cb) => {
       const ext = path.extname(file.originalname).replace(/[^.\w]/g, "") || ".bin";
       cb(null, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`);
@@ -133,11 +157,20 @@ async function transcribeWithGroq(file: string, language: string): Promise<Trans
 
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${GROQ_KEY}` },
-      body: form,
-    });
+    let res: Response;
+    try {
+      res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${GROQ_KEY}` },
+        body: form,
+        signal: AbortSignal.timeout(4 * 60 * 1000),
+      });
+    } catch (err) {
+      // Network blip or timeout: back off and retry instead of failing the whole request.
+      lastErr = new Error(`Groq network error: ${(err as Error).message}`);
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      continue;
+    }
     if (res.ok) {
       const data: any = await res.json();
       // Drop words that fall inside segments Whisper itself marks as "probably not speech"
@@ -171,7 +204,13 @@ let geminiModelCache: string[] | null = null;
 const badGeminiModels = new Set<string>();
 
 async function getGeminiModels(): Promise<string[]> {
-  if (geminiModelCache) return geminiModelCache.filter((m) => !badGeminiModels.has(m));
+  if (geminiModelCache) {
+    const usable = geminiModelCache.filter((m) => !badGeminiModels.has(m));
+    if (usable.length) return usable;
+    // Every known model failed: forget the blacklist and rediscover instead of staying broken until restart.
+    badGeminiModels.clear();
+    geminiModelCache = null;
+  }
   const preferred = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"];
   const discovered: string[] = [];
   try {
@@ -295,6 +334,55 @@ async function transcribeWithGemini(file: string, mime: string, language: string
   }
 }
 
+// ---------- Protection for free-tier hosting ----------
+
+// Per-IP limit so one visitor (or bot) can't burn the whole free AI quota.
+const RATE_LIMIT_PER_HOUR = Number(process.env.RATE_LIMIT_PER_HOUR) || 30;
+const requestLog = new Map<string, number[]>();
+
+function rateLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const recent = (requestLog.get(ip) || []).filter((t) => now - t < 60 * 60 * 1000);
+  if (recent.length >= RATE_LIMIT_PER_HOUR) {
+    const retryMin = Math.ceil((recent[0] + 60 * 60 * 1000 - now) / 60000);
+    res.setHeader("Retry-After", String(retryMin * 60));
+    return res.status(429).json({ error: `Too many caption requests from your network. Please try again in ${retryMin} minute${retryMin === 1 ? "" : "s"}.` });
+  }
+  recent.push(now);
+  requestLog.set(ip, recent);
+  next();
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, times] of requestLog) {
+    if (!times.some((t) => now - t < 60 * 60 * 1000)) requestLog.delete(ip);
+  }
+}, 10 * 60 * 1000).unref();
+
+// Only a few ffmpeg + AI jobs at once; extra requests wait their turn instead of
+// running the small free instance out of memory.
+const MAX_CONCURRENT_JOBS = Number(process.env.MAX_CONCURRENT_JOBS) || 2;
+let activeJobs = 0;
+const jobQueue: (() => void)[] = [];
+
+function acquireJobSlot(): Promise<() => void> {
+  return new Promise((resolve) => {
+    const grant = () => {
+      activeJobs++;
+      let released = false;
+      resolve(() => {
+        if (released) return;
+        released = true;
+        activeJobs--;
+        jobQueue.shift()?.();
+      });
+    };
+    if (activeJobs < MAX_CONCURRENT_JOBS) grant();
+    else jobQueue.push(grant);
+  });
+}
+
 function friendlyError(err: unknown): string {
   const msg = String((err as any)?.message || err);
   if (/API key not valid|API_KEY_INVALID|invalid_api_key|401/i.test(msg)) return "The server's AI API key is invalid. Check GEMINI_API_KEY / GROQ_API_KEY in your hosting settings.";
@@ -306,14 +394,17 @@ function friendlyError(err: unknown): string {
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
+  // Behind Render/Heroku-style proxies, trust the first hop so req.ip is the real visitor.
+  app.set("trust proxy", 1);
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, engines: { groq: !!GROQ_KEY, gemini: !!GEMINI_KEY }, maxUploadMb: MAX_UPLOAD_MB });
   });
 
-  app.post("/api/transcribe", upload.single("video"), async (req, res) => {
+  app.post("/api/transcribe", rateLimit, upload.single("video"), async (req, res) => {
     const file = req.file;
     let speechFile: string | null = null;
+    let releaseSlot: (() => void) | null = null;
     try {
       if (!file) return res.status(400).json({ error: "No media file received." });
       if (!GROQ_KEY && !GEMINI_KEY) {
@@ -322,6 +413,9 @@ async function startServer() {
 
       const language = String(req.body.language || "Auto-detect");
       console.log(`[Transcribe] ${file.originalname} ${(file.size / 1048576).toFixed(1)}MB lang=${language}`);
+
+      releaseSlot = await acquireJobSlot();
+      if (req.socket?.destroyed) return; // client gave up while waiting in the queue
 
       speechFile = await toSpeechMp3(file.path);
       const mediaFile = speechFile || file.path;
@@ -366,6 +460,7 @@ async function startServer() {
     } finally {
       safeUnlink(file?.path);
       safeUnlink(speechFile);
+      releaseSlot?.();
     }
   });
 
@@ -388,12 +483,23 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath, { maxAge: "7d", index: false }));
-    app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
+    // index.html must never be cached, otherwise browsers keep requesting deleted asset hashes after a deploy.
+    app.get("*", (_req, res) => {
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.sendFile(path.join(distPath, "index.html"));
+    });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}  (groq=${!!GROQ_KEY}, gemini=${!!GEMINI_KEY})`);
   });
+  // Node closes requests after 5 minutes by default, which kills long uploads + transcriptions.
+  server.requestTimeout = 20 * 60 * 1000;
+  server.headersTimeout = 2 * 60 * 1000;
+  server.keepAliveTimeout = 65 * 1000;
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("[server] failed to start:", err);
+  process.exit(1);
+});

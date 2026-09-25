@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Project, StyleOptions, DEFAULT_STYLES } from '../types';
-import { ChevronLeft, Download, FileText, Loader2, Pause, Play, Captions, Clock, Palette, CheckCircle2, AlertTriangle, X } from 'lucide-react';
-import { cn, formatTime } from '../lib/utils';
+import { ChevronLeft, Download, FileText, Loader2, Pause, Play, Captions, Clock, Palette, CheckCircle2, AlertTriangle, X, Undo2, Redo2 } from 'lucide-react';
+import { cn, formatTime, loadPref, savePref } from '../lib/utils';
 import { saveProject } from '../lib/db';
 import { prepareUpload } from '../lib/audioExtractor';
-import { buildPhrases, downloadBlob, repairWords, retimePhrase, toSrt } from '../lib/captionUtils';
+import { buildPhrases, downloadBlob, repairWords, retimePhrase, sanitizePhrases, toSrt } from '../lib/captionUtils';
 import { drawCaptions, ensureFontLoaded, findActive, FONTS } from '../lib/captionRenderer';
 import { CaptionsPanel, StylePanel, TimingPanel } from './EditorPanels';
 
@@ -17,15 +17,37 @@ type Notice = { kind: 'success' | 'error' | 'info'; text: string } | null;
 
 function normalizeProject(p: Project): Project {
   const styles: StyleOptions = { ...DEFAULT_STYLES, ...p.styles };
+  // Any missing or wrong-typed setting falls back to its default instead of crashing the renderer.
+  for (const key of Object.keys(DEFAULT_STYLES) as (keyof StyleOptions)[]) {
+    if (typeof styles[key] !== typeof DEFAULT_STYLES[key] || (typeof styles[key] === 'number' && !Number.isFinite(styles[key]))) {
+      (styles as any)[key] = DEFAULT_STYLES[key];
+    }
+  }
   if (!FONTS.some((f) => f.value === styles.fontFamily)) {
     const match = FONTS.find((f) => styles.fontFamily.toLowerCase().includes(f.label.split(' ')[0].toLowerCase()));
     styles.fontFamily = match ? match.value : /impact/i.test(styles.fontFamily) ? FONTS[2].value : FONTS[0].value;
   }
-  return { ...p, styles, phrases: Array.isArray(p.phrases) ? p.phrases : [] };
+  return { ...p, styles, phrases: sanitizePhrases(p.phrases) };
+}
+
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Free hosts put the server to sleep; ping it first so the upload doesn't hit a cold start. */
+async function wakeServer(onWaiting: () => void): Promise<void> {
+  for (let i = 0; i < 12; i++) {
+    try {
+      const res = await fetch('/api/health', { cache: 'no-store', signal: AbortSignal.timeout?.(10_000) });
+      if (res.ok) return;
+    } catch {
+      /* still waking up */
+    }
+    onWaiting();
+    await wait(5000);
+  }
 }
 
 /** Uploads with progress so the user sees real movement instead of a frozen spinner. */
-function postTranscribe(form: FormData, onUploadProgress: (pct: number) => void): Promise<{ status: number; data: any }> {
+function postTranscribe(form: FormData, onUploadProgress: (pct: number) => void): Promise<{ status: number; data: any; gateway: boolean }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/transcribe');
@@ -34,12 +56,15 @@ function postTranscribe(form: FormData, onUploadProgress: (pct: number) => void)
     xhr.upload.onload = () => onUploadProgress(100);
     xhr.onload = () => {
       let data: any = null;
+      let gateway = false;
       try {
         data = JSON.parse(xhr.responseText);
       } catch {
+        // Non-JSON means a proxy/gateway answered (server asleep or restarting), not our API.
+        gateway = true;
         data = { error: xhr.status === 413 ? 'This file is too large to upload.' : 'The server is waking up or busy. Please try again.' };
       }
-      resolve({ status: xhr.status, data });
+      resolve({ status: xhr.status, data, gateway });
     };
     xhr.onerror = () => reject(new Error('Network error — check your internet connection.'));
     xhr.ontimeout = () => reject(new Error('The request took too long. Try a shorter clip.'));
@@ -69,8 +94,16 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
   const [isPlaying, setIsPlaying] = useState(false);
   const [activePhrase, setActivePhrase] = useState(-1);
   const [tab, setTab] = useState<'captions' | 'timing' | 'style'>('captions');
-  const [language, setLanguage] = useState('Auto-detect');
-  const [wordsPerLine, setWordsPerLine] = useState(5);
+  const [language, setLanguageState] = useState(() => loadPref('language', 'Auto-detect'));
+  const [wordsPerLine, setWordsPerLineState] = useState(() => loadPref('wordsPerLine', 5));
+  const setLanguage = (v: string) => {
+    setLanguageState(v);
+    savePref('language', v);
+  };
+  const setWordsPerLine = (n: number) => {
+    setWordsPerLineState(n);
+    savePref('wordsPerLine', n);
+  };
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStep, setGenerationStep] = useState('');
   const [notice, setNotice] = useState<Notice>(null);
@@ -85,24 +118,81 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
 
   /* ---------------------------- persistence ---------------------------- */
 
+  const saveFailed = useRef(false);
   const flushSave = useCallback(async () => {
     window.clearTimeout(saveTimer.current);
     saveTimer.current = undefined;
     try {
       await saveProject(projectRef.current);
+      if (saveFailed.current) {
+        saveFailed.current = false;
+        setNotice({ kind: 'success', text: 'Changes saved again.' });
+      }
     } catch (err) {
       console.error('Save failed', err);
+      if (!saveFailed.current) {
+        saveFailed.current = true;
+        const full = (err as DOMException)?.name === 'QuotaExceededError';
+        setNotice({
+          kind: 'error',
+          text: full
+            ? 'Browser storage is full, so your latest changes are not saved. Delete old projects or download the SRT to keep your work.'
+            : 'Your latest changes could not be saved. The app will keep retrying on every edit.',
+        });
+      }
     }
   }, []);
 
-  const commit = useCallback((updater: (p: Project) => Project, immediate = false) => {
-    const next = updater(projectRef.current);
+  // Undo/redo history for captions and styles (name/duration changes are not recorded).
+  type Snapshot = Pick<Project, 'phrases' | 'styles'>;
+  const past = useRef<Snapshot[]>([]);
+  const future = useRef<Snapshot[]>([]);
+  const lastRecordAt = useRef(0);
+  const [, setHistoryVersion] = useState(0);
+
+  const apply = useCallback((next: Project, immediate: boolean) => {
     projectRef.current = next;
     setProject(next);
     window.clearTimeout(saveTimer.current);
     if (immediate) flushSave();
     else saveTimer.current = window.setTimeout(flushSave, 500);
   }, [flushSave]);
+
+  const commit = useCallback((updater: (p: Project) => Project, immediate = false) => {
+    const prev = projectRef.current;
+    const next = updater(prev);
+    if (next.phrases !== prev.phrases || next.styles !== prev.styles) {
+      // Group rapid changes (slider drags, typing) into one undo step.
+      const now = Date.now();
+      if (now - lastRecordAt.current > 700) {
+        past.current = [...past.current.slice(-99), { phrases: prev.phrases, styles: prev.styles }];
+        setHistoryVersion((v) => v + 1);
+      }
+      lastRecordAt.current = now;
+      if (future.current.length) future.current = [];
+    }
+    apply(next, immediate);
+  }, [apply]);
+
+  const undo = useCallback(() => {
+    const snap = past.current.pop();
+    if (!snap) return;
+    const cur = projectRef.current;
+    future.current.push({ phrases: cur.phrases, styles: cur.styles });
+    lastRecordAt.current = 0;
+    setHistoryVersion((v) => v + 1);
+    apply({ ...cur, ...snap }, false);
+  }, [apply]);
+
+  const redo = useCallback(() => {
+    const snap = future.current.pop();
+    if (!snap) return;
+    const cur = projectRef.current;
+    past.current.push({ phrases: cur.phrases, styles: cur.styles });
+    lastRecordAt.current = 0;
+    setHistoryVersion((v) => v + 1);
+    apply({ ...cur, ...snap }, false);
+  }, [apply]);
 
   useEffect(() => {
     return () => {
@@ -125,6 +215,10 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
   /* ------------------------------- video ------------------------------- */
 
   useEffect(() => {
+    if (!(project.videoBlob instanceof Blob)) {
+      setNotice({ kind: 'error', text: 'The video for this project is missing from browser storage. Please upload it again as a new project.' });
+      return;
+    }
     const url = URL.createObjectURL(project.videoBlob);
     setVideoUrl(url);
     return () => URL.revokeObjectURL(url);
@@ -168,10 +262,18 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     let raf = 0;
+    let lastError = '';
     const loop = () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const p = projectRef.current;
-      drawCaptions(ctx, canvas.width, canvas.height, video.currentTime, p.phrases, p.styles);
+      try {
+        drawCaptions(ctx, canvas.width, canvas.height, video.currentTime, p.phrases, p.styles);
+      } catch (err) {
+        // A bad frame must never kill the preview loop; log once and keep going.
+        const msg = String((err as Error)?.message || err);
+        if (msg !== lastError) console.error('Caption preview error:', err);
+        lastError = msg;
+      }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -212,19 +314,54 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
-      if (e.code === 'Space' && tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT' && tag !== 'BUTTON') {
+      const typing = tag === 'TEXTAREA' || (tag === 'INPUT' && (e.target as HTMLInputElement).type !== 'range');
+      if (e.code === 'Space' && !typing && tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'BUTTON') {
         e.preventDefault();
         togglePlay();
+      }
+      // Text fields keep their own native undo.
+      if ((e.ctrlKey || e.metaKey) && !typing && exportCancel.current === null) {
+        const key = e.key.toLowerCase();
+        if (key === 'z' && !e.shiftKey) {
+          e.preventDefault();
+          undo();
+        } else if ((key === 'z' && e.shiftKey) || key === 'y') {
+          e.preventDefault();
+          redo();
+        }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [togglePlay]);
+  }, [togglePlay, undo, redo]);
+
+  // Warn before closing the tab while work would be lost.
+  useEffect(() => {
+    if (!isGenerating && exportProgress === null) return;
+    const onUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onUnload);
+    return () => window.removeEventListener('beforeunload', onUnload);
+  }, [isGenerating, exportProgress !== null]);
+
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === 'hidden' && saveTimer.current !== undefined) flushSave();
+    };
+    document.addEventListener('visibilitychange', onHide);
+    return () => document.removeEventListener('visibilitychange', onHide);
+  }, [flushSave]);
 
   /* ----------------------------- generation ---------------------------- */
 
   const generateCaptions = async () => {
     if (isGenerating) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setNotice({ kind: 'error', text: 'You are offline. Connect to the internet and try again.' });
+      return;
+    }
     setIsGenerating(true);
     setNotice(null);
     try {
@@ -232,27 +369,32 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
       const duration = videoRef.current?.duration || project.duration;
       const { blob, filename } = await prepareUpload(project.videoBlob, Number.isFinite(duration) ? duration : undefined);
 
-      let result: { status: number; data: any } | null = null;
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      setGenerationStep('Connecting to server…');
+      await wakeServer(() => setGenerationStep('Waking up server (free hosting, ~30s)…'));
+
+      const MAX_ATTEMPTS = 4;
+      let result: { status: number; data: any; gateway: boolean } | null = null;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         const form = new FormData();
         form.append('video', blob, filename);
         form.append('language', language);
-        setGenerationStep(attempt > 1 ? `Retrying (${attempt}/3)…` : 'Uploading 0%');
+        setGenerationStep(attempt > 1 ? `Retrying automatically (${attempt}/${MAX_ATTEMPTS})…` : 'Uploading 0%');
         try {
           result = await postTranscribe(form, (pct) =>
             setGenerationStep(pct < 100 ? `Uploading ${pct}%` : 'AI is listening…')
           );
         } catch (err) {
-          if (attempt === 3) throw err;
-          await new Promise((r) => setTimeout(r, 1500 * attempt));
+          if (attempt === MAX_ATTEMPTS) throw err;
+          await wait(2000 * attempt);
+          await wakeServer(() => setGenerationStep('Reconnecting to server…'));
           continue;
         }
-        // Retry only temporary failures (server waking up / gateway hiccups).
-        if ((result.status >= 500 && result.status !== 503) || result.status === 0) {
-          if (attempt < 3) {
-            await new Promise((r) => setTimeout(r, 1500 * attempt));
-            continue;
-          }
+        // Auto-retry temporary failures: gateway/cold-start pages, server errors and AI rate limits.
+        // Our own 503 ("no AI key configured") is permanent, so it is not retried.
+        const temporary = result.gateway ? result.status >= 500 || result.status === 0 : result.status >= 500 && result.status !== 503;
+        if (temporary && attempt < MAX_ATTEMPTS) {
+          await wait((/quota|busy|overloaded/i.test(result.data?.error || '') ? 8000 : 2000) * attempt);
+          continue;
         }
         break;
       }
@@ -326,7 +468,17 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
     setNotice(null);
     setExportProgress(0);
     let cancelled = false;
+    let stalled = false;
+    let drawing = true;
     let raf = 0;
+    let drawTimer = 0;
+    let watchdog = 0;
+    const stopDraw = () => {
+      drawing = false;
+      cancelAnimationFrame(raf);
+      window.clearTimeout(drawTimer);
+      window.clearInterval(watchdog);
+    };
 
     try {
       await ensureFontLoaded(p.styles.fontFamily);
@@ -373,29 +525,52 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
         video.currentTime = 0;
       });
 
+      const duration = video.duration || 1;
+      let lastProgressAt = Date.now();
+      let lastTime = 0;
       const finished = new Promise<void>((resolve) => {
         exportCancel.current = () => {
           cancelled = true;
           resolve();
         };
         video.addEventListener('ended', () => resolve(), { once: true });
+        // Watchdog: if playback gets stuck, nudge it; if it stays stuck, finish with what was recorded.
+        watchdog = window.setInterval(() => {
+          if (video.currentTime !== lastTime) {
+            lastTime = video.currentTime;
+            lastProgressAt = Date.now();
+          } else if (Date.now() - lastProgressAt > 20_000) {
+            stalled = true;
+            resolve();
+          } else if (Date.now() - lastProgressAt > 3_000 && !video.ended) {
+            video.play().catch(() => {});
+          }
+          if (video.currentTime >= duration - 0.05) resolve();
+        }, 1000);
       });
       // Keep playing if the browser pauses the video mid-export (e.g. media key).
       const keepPlaying = () => !cancelled && !video.ended && video.play().catch(() => {});
       video.addEventListener('pause', keepPlaying);
 
-      const duration = video.duration || 1;
       let lastPct = -1;
       const draw = () => {
         ctx.drawImage(video, 0, 0, W, H);
         const cur = projectRef.current;
-        drawCaptions(ctx, W, H, video.currentTime, cur.phrases, cur.styles);
+        try {
+          drawCaptions(ctx, W, H, video.currentTime, cur.phrases, cur.styles);
+        } catch (err) {
+          console.error('Caption render error during export:', err);
+        }
         const pct = Math.min(99, Math.floor((video.currentTime / duration) * 100));
         if (pct !== lastPct) {
           lastPct = pct;
           setExportProgress(pct);
         }
-        raf = requestAnimationFrame(draw);
+        // requestAnimationFrame stops in background tabs; fall back to a timer so the export keeps going.
+        if (drawing) {
+          if (document.hidden) drawTimer = window.setTimeout(draw, 33);
+          else raf = requestAnimationFrame(draw);
+        }
       };
       draw();
       recorder.start(500);
@@ -403,7 +578,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
 
       await finished;
       video.removeEventListener('pause', keepPlaying);
-      cancelAnimationFrame(raf);
+      stopDraw();
       video.pause();
       if (recorder.state !== 'inactive') recorder.stop();
       await stopped;
@@ -412,7 +587,11 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
       if (!cancelled && chunks.length) {
         const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
         downloadBlob(new Blob(chunks, { type: mimeType.split(';')[0] }), `${p.name}_captioned.${ext}`);
-        setNotice({ kind: 'success', text: `Export complete — your ${ext.toUpperCase()} is downloading.` });
+        setNotice(
+          stalled
+            ? { kind: 'error', text: `Video playback got stuck, so the ${ext.toUpperCase()} was saved up to that point. Keep this tab visible and try exporting again for the full video.` }
+            : { kind: 'success', text: `Export complete — your ${ext.toUpperCase()} is downloading.` }
+        );
       } else if (cancelled) {
         setNotice({ kind: 'info', text: 'Export cancelled.' });
       }
@@ -420,7 +599,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
       console.error(err);
       setNotice({ kind: 'error', text: 'Export failed: ' + ((err as Error).message || 'unknown error') });
     } finally {
-      cancelAnimationFrame(raf);
+      stopDraw();
       exportCancel.current = null;
       setExportProgress(null);
       video.currentTime = 0;
@@ -448,6 +627,14 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
           />
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center">
+            <button onClick={undo} disabled={isExporting || !past.current.length} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 disabled:opacity-30 disabled:pointer-events-none" title="Undo (Ctrl+Z)">
+              <Undo2 size={16} />
+            </button>
+            <button onClick={redo} disabled={isExporting || !future.current.length} className="hidden sm:block p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 disabled:opacity-30 disabled:pointer-events-none" title="Redo (Ctrl+Shift+Z)">
+              <Redo2 size={16} />
+            </button>
+          </div>
           <button onClick={downloadSrt} disabled={isExporting} className="btn-ghost px-3 py-2 text-xs" title="Download subtitles (.srt)">
             <FileText size={15} /> <span className="hidden sm:inline">SRT</span>
           </button>

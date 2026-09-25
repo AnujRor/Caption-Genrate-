@@ -14,4 +14,7 @@ RUN npm run build && npm prune --omit=dev
 ENV NODE_ENV=production
 EXPOSE 3000
 
+# Run without root privileges; the app only needs to write to the OS temp folder.
+USER node
+
 CMD ["node", "dist/server.cjs"]

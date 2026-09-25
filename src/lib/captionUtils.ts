@@ -37,6 +37,34 @@ export function repairWords(raw: Word[]): Word[] {
 }
 
 /**
+ * Repairs caption data loaded from storage (old versions, interrupted saves) so a
+ * single malformed line can never crash the editor or the renderer.
+ */
+export function sanitizePhrases(raw: unknown): Phrase[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Phrase[] = [];
+  for (const p of raw) {
+    if (!p || typeof p !== 'object') continue;
+    const words: Word[] = (Array.isArray((p as Phrase).words) ? (p as Phrase).words : [])
+      .filter((w) => w && typeof w.word === 'string' && w.word.trim() && Number.isFinite(Number(w.start)))
+      .map((w) => {
+        const start = Math.max(0, Number(w.start));
+        const end = Number(w.end);
+        return { word: w.word, start, end: Number.isFinite(end) && end > start ? end : start + 0.25 };
+      })
+      .sort((a, b) => a.start - b.start);
+    if (!words.length) continue;
+    out.push({
+      id: typeof (p as Phrase).id === 'string' && (p as Phrase).id ? (p as Phrase).id : newId(),
+      start: words[0].start,
+      end: words[words.length - 1].end,
+      words,
+    });
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+/**
  * Groups words into short, readable caption lines that break on natural pauses.
  */
 export function buildPhrases(words: Word[], maxWords = 5): Phrase[] {

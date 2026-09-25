@@ -1,4 +1,5 @@
-import { Project } from "../types";
+import { Project, DEFAULT_STYLES } from "../types";
+import { sanitizePhrases } from "./captionUtils";
 
 const DB_NAME = "AutoCaptionDB";
 const STORE_NAME = "projects";
@@ -26,17 +27,25 @@ export function getDB(): Promise<IDBDatabase> {
         db.close();
         dbPromise = null;
       };
+      // Browsers (notably Safari) can drop the connection in the background; reopen on next use.
+      db.onclose = () => {
+        dbPromise = null;
+      };
       resolve(db);
     };
     request.onerror = () => {
       dbPromise = null;
       reject(request.error);
     };
+    request.onblocked = () => {
+      dbPromise = null;
+      reject(new Error("Storage is busy in another tab. Close other tabs of this app and try again."));
+    };
   });
   return dbPromise;
 }
 
-function run<T>(mode: IDBTransactionMode, op: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+function runOnce<T>(mode: IDBTransactionMode, op: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   return getDB().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
@@ -49,12 +58,36 @@ function run<T>(mode: IDBTransactionMode, op: (store: IDBObjectStore) => IDBRequ
   );
 }
 
+// Self-healing: if the connection went stale, drop it and retry once on a fresh one.
+async function run<T>(mode: IDBTransactionMode, op: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+  try {
+    return await runOnce(mode, op);
+  } catch (err) {
+    if ((err as DOMException)?.name === "QuotaExceededError") throw err;
+    dbPromise = null;
+    return runOnce(mode, op);
+  }
+}
+
+/** Fills in anything missing from records saved by older versions or interrupted writes. */
+function repairProject(raw: any): Project | null {
+  if (!raw || typeof raw.id !== "string" || !(raw.videoBlob instanceof Blob)) return null;
+  return {
+    ...raw,
+    name: typeof raw.name === "string" && raw.name.trim() ? raw.name : "Untitled video",
+    phrases: sanitizePhrases(raw.phrases),
+    styles: { ...DEFAULT_STYLES, ...(raw.styles && typeof raw.styles === "object" ? raw.styles : {}) },
+    createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
+  };
+}
+
 export async function saveProject(project: Project): Promise<void> {
   await run("readwrite", (store) => store.put({ ...project, updatedAt: Date.now() }));
 }
 
 export async function getProjects(): Promise<Project[]> {
-  const projects = (await run("readonly", (store) => store.getAll())) as Project[];
+  const raw = (await run("readonly", (store) => store.getAll())) as unknown[];
+  const projects = raw.map(repairProject).filter((p): p is Project => p !== null);
   return projects.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
 }
 
