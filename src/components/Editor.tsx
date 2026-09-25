@@ -144,7 +144,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
   }, []);
 
   // Undo/redo history for captions and styles (name/duration changes are not recorded).
-  type Snapshot = Pick<Project, 'phrases' | 'styles'>;
+  type Snapshot = Pick<Project, 'phrases' | 'styles' | 'detectedLanguage'>;
   const past = useRef<Snapshot[]>([]);
   const future = useRef<Snapshot[]>([]);
   const lastRecordAt = useRef(0);
@@ -165,7 +165,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
       // Group rapid changes (slider drags, typing) into one undo step.
       const now = Date.now();
       if (now - lastRecordAt.current > 700) {
-        past.current = [...past.current.slice(-99), { phrases: prev.phrases, styles: prev.styles }];
+        past.current = [...past.current.slice(-99), { phrases: prev.phrases, styles: prev.styles, detectedLanguage: prev.detectedLanguage }];
         setHistoryVersion((v) => v + 1);
       }
       lastRecordAt.current = now;
@@ -178,7 +178,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
     const snap = past.current.pop();
     if (!snap) return;
     const cur = projectRef.current;
-    future.current.push({ phrases: cur.phrases, styles: cur.styles });
+    future.current.push({ phrases: cur.phrases, styles: cur.styles, detectedLanguage: cur.detectedLanguage });
     lastRecordAt.current = 0;
     setHistoryVersion((v) => v + 1);
     apply({ ...cur, ...snap }, false);
@@ -188,7 +188,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
     const snap = future.current.pop();
     if (!snap) return;
     const cur = projectRef.current;
-    past.current.push({ phrases: cur.phrases, styles: cur.styles });
+    past.current.push({ phrases: cur.phrases, styles: cur.styles, detectedLanguage: cur.detectedLanguage });
     lastRecordAt.current = 0;
     setHistoryVersion((v) => v + 1);
     apply({ ...cur, ...snap }, false);
@@ -437,6 +437,46 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
         ? p.phrases.map((ph) => (ph.id === id ? retimePhrase(ph, text) : ph))
         : p.phrases.filter((ph) => ph.id !== id),
     }));
+  };
+
+  const [convertingScript, setConvertingScript] = useState(false);
+  const convertScript = async (target: 'Hinglish' | 'Hindi') => {
+    if (convertingScript) return;
+    const snapshot = projectRef.current.phrases;
+    const words = snapshot.flatMap((ph) => ph.words.map((w) => w.word));
+    if (!words.length) return;
+    setConvertingScript(true);
+    setNotice(null);
+    try {
+      let data: any = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch('/api/transliterate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ words, target }),
+          });
+          data = await res.json().catch(() => ({ error: 'The server is waking up. Please try again.' }));
+          if (res.ok || (res.status < 500 && res.status !== 429)) break;
+        } catch {
+          data = { error: 'Network error — check your internet connection.' };
+        }
+        if (attempt < 3) await wait(2000 * attempt);
+      }
+      if (!Array.isArray(data?.words) || data.words.length !== words.length) {
+        throw new Error(data?.error || 'Could not convert the captions. Please try again.');
+      }
+      // Captions changed while waiting (user edited): don't overwrite their edits.
+      if (projectRef.current.phrases !== snapshot) throw new Error('Captions were edited during conversion. Please try again.');
+      let i = 0;
+      const phrases = snapshot.map((ph) => ({ ...ph, words: ph.words.map((w) => ({ ...w, word: String(data.words[i++]) })) }));
+      commit((p) => ({ ...p, phrases, detectedLanguage: target }), true);
+      setNotice({ kind: 'success', text: target === 'Hinglish' ? 'Captions converted to Hinglish. Press Undo to switch back.' : 'कैप्शन हिन्दी लिपि में बदल दिए गए। वापस जाने के लिए Undo दबाएँ।' });
+    } catch (err) {
+      setNotice({ kind: 'error', text: (err as Error).message });
+    } finally {
+      setConvertingScript(false);
+    }
   };
 
   const deletePhrase = (id: string) => commit((p) => ({ ...p, phrases: p.phrases.filter((ph) => ph.id !== id) }));
@@ -748,6 +788,8 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
                 onSeek={seekTo}
                 onEditPhrase={editPhrase}
                 onDeletePhrase={deletePhrase}
+                onConvertScript={convertScript}
+                convertingScript={convertingScript}
               />
             )}
             {tab === 'timing' && (

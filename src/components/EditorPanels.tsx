@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Check, Pencil, Play, RefreshCw, Sparkles, Trash2, Wand2, X, Loader2, Globe } from 'lucide-react';
+import { Check, Pencil, Play, RefreshCw, Sparkles, Trash2, Wand2, X, Loader2, Globe, Languages } from 'lucide-react';
 import { Phrase, Project, StyleOptions } from '../types';
 import { FONTS, PRESETS } from '../lib/captionRenderer';
 import { cn, formatTime } from '../lib/utils';
@@ -137,6 +137,8 @@ export function CaptionsPanel({
   onSeek,
   onEditPhrase,
   onDeletePhrase,
+  onConvertScript,
+  convertingScript,
 }: {
   project: Project;
   language: string;
@@ -144,6 +146,8 @@ export function CaptionsPanel({
   isGenerating: boolean;
   generationStep: string;
   onGenerate: () => void;
+  onConvertScript: (target: 'Hinglish' | 'Hindi') => void;
+  convertingScript: boolean;
   activePhrase: number;
   isPlaying: boolean;
   onSeek: (t: number) => void;
@@ -167,6 +171,8 @@ export function CaptionsPanel({
   };
 
   const hasCaptions = project.phrases.length > 0;
+  const hasDevanagari = hasCaptions && project.phrases.some((p) => p.words.some((w) => /[ऀ-ॿ]/.test(w.word)));
+  const scriptTarget: 'Hinglish' | 'Hindi' | null = hasDevanagari ? 'Hinglish' : hasCaptions && project.detectedLanguage === 'Hinglish' ? 'Hindi' : null;
 
   return (
     <div className="space-y-4">
@@ -188,7 +194,7 @@ export function CaptionsPanel({
             </option>
           ))}
         </select>
-        <p className="text-[10.5px] text-zinc-500 mt-2 leading-relaxed">Choosing the exact language gives the most accurate words. Pick Hinglish to get Hindi written in English letters.</p>
+        <p className="text-[10.5px] text-zinc-500 mt-2 leading-relaxed">Auto-detect recognises every listed language. Pick Hinglish to get Hindi written in English letters.</p>
 
         <button onClick={onGenerate} disabled={isGenerating} className={cn('mt-3 w-full py-3 text-sm', hasCaptions ? 'btn-ghost' : 'btn-primary')}>
           {isGenerating ? (
@@ -206,6 +212,17 @@ export function CaptionsPanel({
             </>
           )}
         </button>
+
+        {scriptTarget && !isGenerating && (
+          <button onClick={() => onConvertScript(scriptTarget)} disabled={convertingScript} className="btn-ghost mt-2 w-full py-2.5 text-xs">
+            {convertingScript ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
+            {convertingScript
+              ? 'Converting…'
+              : scriptTarget === 'Hinglish'
+                ? 'Convert to Hinglish (English letters)'
+                : 'हिन्दी लिपि में बदलें (Hindi script)'}
+          </button>
+        )}
       </div>
 
       {hasCaptions ? (

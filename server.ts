@@ -7,6 +7,7 @@ import multer from "multer";
 import { execFile } from "child_process";
 import util from "util";
 import { GoogleGenAI, Type } from "@google/genai";
+import { devanagariToHinglish, expectedScript, needsScriptFix } from "./server/scripts";
 
 const execFileAsync = util.promisify(execFile);
 
@@ -75,6 +76,9 @@ const WHISPER_LANG: Record<string, string> = {
   Spanish: "es", French: "fr", German: "de", Russian: "ru", Japanese: "ja",
   Korean: "ko", Chinese: "zh", Portuguese: "pt", Italian: "it", Turkish: "tr",
 };
+const LANG_NAME: Record<string, string> = Object.fromEntries(
+  Object.entries(WHISPER_LANG).filter(([name]) => !["Haryanvi", "Bhojpuri"].includes(name)).map(([name, iso]) => [iso, name])
+);
 
 function safeUnlink(p: string | null | undefined) {
   if (!p) return;
@@ -138,25 +142,43 @@ function normalizeWords(list: any[], duration: number | null): Word[] {
 }
 
 // ---------- Groq Whisper (free tier, precise word timestamps) ----------
-async function transcribeWithGroq(file: string, language: string): Promise<TranscribeResult> {
+// large-v3 is the most accurate; turbo has its own free quota, so it takes over when v3 is busy.
+const GROQ_WHISPER_MODELS = ["whisper-large-v3", "whisper-large-v3-turbo"];
+// No "prompt" is sent: on unclear audio Whisper copies prompt text into the captions.
+
+interface GroqResult extends TranscribeResult {
+  /** Whisper's own confidence (mean log-probability of the text); higher is better. */
+  score: number;
+}
+
+async function transcribeWithGroq(file: string, iso: string | null): Promise<GroqResult> {
   const buf = await fs.promises.readFile(file);
+  let lastErr: Error | null = null;
+  for (const model of GROQ_WHISPER_MODELS) {
+    try {
+      return await groqWhisperRequest(buf, file, iso, model);
+    } catch (err) {
+      lastErr = err as Error;
+      // A bad key or bad file fails the same way on every model.
+      if (/Groq (400|401|403|413)/.test(lastErr.message)) break;
+      console.warn(`[Groq] ${model} failed, trying next model:`, lastErr.message.slice(0, 150));
+    }
+  }
+  throw lastErr || new Error("Groq transcription failed");
+}
+
+async function groqWhisperRequest(buf: Buffer, file: string, iso: string | null, model: string): Promise<GroqResult> {
   const form = new FormData();
   form.append("file", new Blob([buf], { type: mimeFor(file, "audio/mp3") }), path.basename(file));
-  form.append("model", "whisper-large-v3");
+  form.append("model", model);
   form.append("response_format", "verbose_json");
   form.append("timestamp_granularities[]", "word");
   form.append("timestamp_granularities[]", "segment");
   form.append("temperature", "0");
-
-  const iso = WHISPER_LANG[language];
   if (iso) form.append("language", iso);
-  if (language === "Hinglish") {
-    // Roman-script prompt nudges Whisper to write Hindi words in English letters.
-    form.append("prompt", "Haan bhai, aaj hum baat karenge. Video ko like aur share karo, channel ko subscribe karo.");
-  }
 
   let lastErr: Error | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     let res: Response;
     try {
       res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
@@ -181,11 +203,16 @@ async function transcribeWithGroq(file: string, language: string): Promise<Trans
       const rawWords = (data.words || []).filter(
         (w: any) => !badSegments.some((s: any) => w.start >= s.start - 0.01 && w.end <= s.end + 0.01)
       );
-      const lang = String(data.language || language || "Auto");
+      const segs: any[] = data.segments || [];
+      const span = segs.reduce((n, s) => n + Math.max(0.01, (s.end ?? 0) - (s.start ?? 0)), 0);
+      const score = span
+        ? segs.reduce((n, s) => n + (Number(s.avg_logprob) || -2) * Math.max(0.01, (s.end ?? 0) - (s.start ?? 0)), 0) / span
+        : -5;
       return {
-        detectedLanguage: lang.charAt(0).toUpperCase() + lang.slice(1),
+        detectedLanguage: titleCase(String(data.language || (iso ? LANG_NAME[iso] : "") || "Unknown")),
         words: normalizeWords(rawWords, data.duration ?? null),
-        engine: "Groq Whisper large-v3",
+        engine: `Groq ${model.replace("whisper-", "Whisper ")}`,
+        score,
       };
     }
     const body = await res.text();
@@ -199,7 +226,218 @@ async function transcribeWithGroq(file: string, language: string): Promise<Trans
   throw lastErr || new Error("Groq transcription failed");
 }
 
+// Whisper's names for some languages differ from the ones used in the app.
+const LANG_ALIASES: Record<string, string> = { panjabi: "Punjabi", castilian: "Spanish", bangla: "Bengali", oriya: "Odia" };
+const titleCase = (s: string) => LANG_ALIASES[s.toLowerCase()] || s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+
+/**
+ * Picks the right Whisper mode per language:
+ * - Hinglish: transcribe as Hindi (keeps every word + timing), then convert to Roman letters.
+ * - Auto-detect: Whisper often mislabels Hindi/Hinglish speech as English or Urdu, which drops
+ *   or mangles the Hindi words. In that case, also listen in Hindi mode and keep the better one.
+ * - Any other language: transcribe in that language directly.
+ */
+async function transcribeGroqFor(file: string, language: string): Promise<TranscribeResult> {
+  if (language === "Hinglish") return transcribeWithGroq(file, "hi");
+  if (language !== "Auto-detect") return transcribeWithGroq(file, WHISPER_LANG[language] || null);
+
+  let best = await transcribeWithGroq(file, null);
+  const detected = best.detectedLanguage.toLowerCase();
+
+  if (detected === "english" || detected === "urdu") {
+    try {
+      const hindi = await transcribeWithGroq(file, "hi");
+      let useHindi: boolean;
+      let reason: string;
+      if (detected === "urdu") {
+        useHindi = hindi.score >= best.score - 0.2; // same speech, but Indian viewers expect Devanagari
+        reason = "score";
+      } else {
+        // English speech forced into Hindi mode comes out as English spelled in Devanagari,
+        // so read the Hindi-mode text to decide. Confidence scores are only the fallback.
+        const verdict = await identifyLanguage(hindi.words.map((w) => w.word).join(" "));
+        const moreWords = hindi.words.length > best.words.length * 1.25;
+        useHindi = verdict ? verdict !== "English" : hindi.score > best.score + 0.1 || (moreWords && hindi.score > best.score);
+        reason = verdict ? `text looks like ${verdict}` : "score";
+      }
+      console.log(
+        `[Auto-detect] Whisper said ${best.detectedLanguage} (score ${best.score.toFixed(3)}, ${best.words.length} words); ` +
+          `Hindi pass score ${hindi.score.toFixed(3)}, ${hindi.words.length} words; ${reason} -> ${useHindi ? "Hindi" : best.detectedLanguage}`
+      );
+      if (useHindi) best = { ...hindi, detectedLanguage: "Hindi" };
+    } catch {
+      /* keep the first result */
+    }
+  }
+
+  // Close Indian languages (Hindi/Punjabi/Marathi/...) get a second opinion from the transcript text.
+  if (CONFUSABLE.has(best.detectedLanguage.toLowerCase()) && best.words.length >= 3) {
+    const named = await identifyLanguage(best.words.map((w) => w.word).join(" "));
+    const currentIso = WHISPER_LANG[best.detectedLanguage];
+    if (named && CONFUSABLE.has(named.toLowerCase()) && WHISPER_LANG[named] !== currentIso) {
+      try {
+        const redo = await transcribeWithGroq(file, WHISPER_LANG[named]);
+        const accept = redo.words.length && redo.score >= best.score - 0.3;
+        console.log(`[Auto-detect] text looks like ${named}; re-listen score ${redo.score.toFixed(3)} vs ${best.score.toFixed(3)} -> ${accept ? named : best.detectedLanguage}`);
+        if (accept) best = { ...redo, detectedLanguage: named };
+      } catch {
+        /* keep current result */
+      }
+    } else if (named && named !== best.detectedLanguage && WHISPER_LANG[named] === currentIso) {
+      best = { ...best, detectedLanguage: named }; // e.g. Bhojpuri/Haryanvi use the Hindi model
+    }
+  }
+  return best;
+}
+
+/** Converts the result to the script the chosen language should be shown in. */
+async function finalizeScript(result: TranscribeResult, language: string): Promise<TranscribeResult> {
+  const target = language === "Auto-detect" ? result.detectedLanguage : language;
+  const text = result.words.map((w) => w.word).join(" ");
+  let out = result;
+  if (result.words.length && expectedScript(target) && needsScriptFix(text, target)) {
+    const fixed = await fixScript(result.words, target);
+    out = { ...result, words: fixed.words, engine: `${result.engine} + ${fixed.method} ${target === "Hinglish" ? "Hinglish" : "script"} conversion` };
+  }
+  return language === "Hinglish" ? { ...out, detectedLanguage: "Hinglish" } : out;
+}
+
+// ---------- Script correction (Hinglish, wrong-script output) ----------
+const GROQ_TEXT_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"];
+
+function scriptInstruction(target: string): string {
+  if (target === "Hinglish") {
+    return 'Rewrite each word in Hinglish: Roman/English letters the way Indians type on WhatsApp (e.g. "नमस्ते"→"namaste", "करेंगे"→"karenge", "नहीं"→"nahi", "वीडियो"→"video", "सब्सक्राइब"→"subscribe"). English loanwords must use normal English spelling. Words already in English letters stay unchanged.';
+  }
+  return `Rewrite each word in the native script of ${target} (transliterate, do NOT translate). Words already in that script stay unchanged.`;
+}
+
+/** Asks a free LLM to transliterate words one-to-one. Returns null if it can't do it reliably. */
+async function llmTransliterate(words: string[], target: string): Promise<string[] | null> {
+  const system = `You are a transliteration engine for subtitles. ${scriptInstruction(target)}
+Never translate, never merge or split words, never drop words.
+Input is a JSON array of N words. Reply ONLY with JSON: {"words": [ ...exactly N strings, same order... ]}`;
+  const user = JSON.stringify(words);
+
+  return askJson(system, user, (reply) => {
+    const out = reply?.words;
+    if (Array.isArray(out) && out.length === words.length && out.every((w) => typeof w === "string" && w.trim())) {
+      return out.map((w: string) => w.trim().replace(/\s+/g, " "));
+    }
+    return null;
+  });
+}
+
+/**
+ * Sends a JSON-only prompt to free LLMs (Groq models, then Gemini) until one gives a
+ * reply that passes `accept`. Returns null if none does — callers always have a fallback.
+ */
+async function askJson<T>(system: string, user: string, accept: (reply: any) => T | null, models = GROQ_TEXT_MODELS): Promise<T | null> {
+  const attempts: (() => Promise<string>)[] = [];
+  if (GROQ_KEY) {
+    for (const model of models) {
+      attempts.push(async () => {
+        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${GROQ_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model,
+            temperature: 0,
+            response_format: { type: "json_object" },
+            ...(model.startsWith("openai/") ? { reasoning_effort: "low" } : {}),
+            messages: [{ role: "system", content: system }, { role: "user", content: user }],
+          }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!res.ok) throw new Error(`Groq ${model} ${res.status}: ${(await res.text()).slice(0, 150)}`);
+        const data: any = await res.json();
+        return String(data.choices?.[0]?.message?.content || "");
+      });
+    }
+  }
+  if (ai && geminiAvailable()) {
+    attempts.push(async () => {
+      const [model] = await getGeminiModels();
+      const r = await ai!.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: `${system}\n\n${user}` }] }],
+        config: { temperature: 0, responseMimeType: "application/json" },
+      });
+      return r.text || "";
+    });
+  }
+
+  for (const attempt of attempts) {
+    try {
+      const text = (await attempt()).replace(/```json|```/gi, "").trim();
+      const accepted = accept(JSON.parse(text));
+      if (accepted !== null) return accepted;
+      console.warn("[LLM] reply had wrong shape, trying next model");
+    } catch (err) {
+      noteGeminiFailure(err);
+      console.warn("[LLM]", (err as Error).message.slice(0, 200));
+    }
+  }
+  return null;
+}
+
+// Languages that share vocabulary/script and that Whisper's audio detector often mixes up.
+const CONFUSABLE = new Set(["hindi", "urdu", "punjabi", "marathi", "gujarati", "bengali", "nepali", "assamese", "sindhi"]);
+
+/** Reads the transcript and names the language actually spoken (text-based second opinion). */
+async function identifyLanguage(text: string): Promise<string | null> {
+  const options = Object.values(LANG_NAME);
+  const system = `You identify the spoken language of a speech transcript. The speech recogniser may have written it in the WRONG script,
+e.g. Punjabi or Marathi words written in Hindi's Devanagari letters, or English words spelled out in Devanagari.
+Judge by the vocabulary and grammar, not by the script:
+- Punjabi clues: "asi", "tusi", "gal", "karange", "haan/han", "nu", "vich", "ki haal".
+- Hindi mixed with some English words (Hinglish) is Hindi.
+- English sentences merely spelled in another script are English.
+Choose exactly one of: ${options.join(", ")}.
+Reply ONLY with JSON: {"language": "<one option>"}`;
+  return askJson(system, text.slice(0, 1500), (reply) => {
+    const name = options.find((o) => o.toLowerCase() === String(reply?.language || "").toLowerCase());
+    return name || null;
+  });
+}
+
+/**
+ * Makes sure words are in the script the user expects. Uses a free LLM in chunks,
+ * and for Hinglish falls back to the built-in converter so it can never fail.
+ */
+async function fixScript(words: Word[], target: string): Promise<{ words: Word[]; method: string }> {
+  if (!words.length) return { words, method: "none" };
+  const CHUNK = 120;
+  const out: Word[] = [];
+  let usedFallback = false;
+  for (let i = 0; i < words.length; i += CHUNK) {
+    const chunk = words.slice(i, i + CHUNK);
+    const converted = await llmTransliterate(chunk.map((w) => w.word), target);
+    chunk.forEach((w, j) => {
+      let text = converted?.[j];
+      if (!text) {
+        usedFallback = true;
+        text = target === "Hinglish" ? devanagariToHinglish(w.word) : w.word;
+      }
+      out.push({ ...w, word: text });
+    });
+  }
+  return { words: out, method: usedFallback ? "built-in" : "AI" };
+}
+
 // ---------- Gemini (free tier via AI Studio key) ----------
+// If the key/project is rejected, stop calling Gemini for a while instead of
+// wasting time on a guaranteed failure in every request.
+let geminiBlockedUntil = 0;
+const geminiAvailable = () => !!ai && Date.now() > geminiBlockedUntil;
+function noteGeminiFailure(err: unknown) {
+  const msg = String((err as any)?.message || err);
+  if (/API key|API_KEY_INVALID|PERMISSION_DENIED|denied access|\b401\b|\b403\b/i.test(msg)) {
+    if (Date.now() > geminiBlockedUntil) console.warn("[Gemini] key/project rejected; pausing Gemini for 15 minutes:", msg.slice(0, 160));
+    geminiBlockedUntil = Date.now() + 15 * 60 * 1000;
+  }
+}
+
 let geminiModelCache: string[] | null = null;
 const badGeminiModels = new Set<string>();
 
@@ -323,7 +561,10 @@ async function transcribeWithGemini(file: string, mime: string, language: string
             await new Promise((r) => setTimeout(r, 2000));
             continue;
           }
-          if (/API key|PERMISSION_DENIED|401|403/i.test(msg)) throw err;
+          if (/API key|PERMISSION_DENIED|denied access|401|403/i.test(msg)) {
+            noteGeminiFailure(err);
+            throw err;
+          }
           break;
         }
       }
@@ -385,6 +626,7 @@ function acquireJobSlot(): Promise<() => void> {
 
 function friendlyError(err: unknown): string {
   const msg = String((err as any)?.message || err);
+  if (/denied access|PERMISSION_DENIED/i.test(msg)) return "Google blocked the Gemini API key's project. Create a new key at aistudio.google.com, or add a free GROQ_API_KEY from console.groq.com.";
   if (/API key not valid|API_KEY_INVALID|invalid_api_key|401/i.test(msg)) return "The server's AI API key is invalid. Check GEMINI_API_KEY / GROQ_API_KEY in your hosting settings.";
   if (/429|RESOURCE_EXHAUSTED|rate limit|quota/i.test(msg)) return "Free AI quota is busy right now. Please wait a minute and try again.";
   if (/503|UNAVAILABLE|overloaded|high demand/i.test(msg)) return "The AI service is overloaded right now. Please try again in a moment.";
@@ -423,32 +665,36 @@ async function startServer() {
       const duration = await probeDuration(mediaFile);
       const mediaSize = fs.statSync(mediaFile).size;
 
-      // Whisper gives far more precise word timing; Gemini handles Hinglish/Odia better.
+      // Whisper (Groq) gives the most precise word timing, so it goes first for every language
+      // it knows. Gemini covers languages Whisper lacks (e.g. Odia) and is the backup.
       const groqOk = !!GROQ_KEY && mediaSize <= GROQ_MAX_BYTES;
-      const geminiFirst = language === "Hinglish" || (language !== "Auto-detect" && !WHISPER_LANG[language]);
+      const whisperKnows = language === "Auto-detect" || language === "Hinglish" || !!WHISPER_LANG[language];
       const engines: (() => Promise<TranscribeResult>)[] = [];
-      const groq = () => transcribeWithGroq(mediaFile, language);
+      const groq = () => transcribeGroqFor(mediaFile, language);
       const gemini = () => transcribeWithGemini(mediaFile, mediaMime, language, duration);
-      if (geminiFirst) {
-        if (ai) engines.push(gemini);
+      if (whisperKnows) {
         if (groqOk) engines.push(groq);
+        if (geminiAvailable()) engines.push(gemini);
       } else {
+        if (geminiAvailable()) engines.push(gemini);
         if (groqOk) engines.push(groq);
-        if (ai) engines.push(gemini);
       }
       if (!engines.length) {
-        return res.status(413).json({ error: "This audio is too long for the configured AI engine. Try a shorter clip." });
+        if (!groqOk && GROQ_KEY) return res.status(413).json({ error: "This audio is too long for the free AI engine. Try a shorter clip." });
+        return res.status(503).json({ error: "The AI service is not available right now. Please try again in a few minutes." });
       }
 
       let lastErr: unknown = null;
       for (const run of engines) {
         try {
-          const result = await run();
+          const raw = await run();
+          if (raw.words.length === 0 && run !== engines[engines.length - 1]) continue;
+          const result = await finalizeScript(raw, language);
           console.log(`[Transcribe] ${result.engine}: ${result.words.length} words (${result.detectedLanguage})`);
-          if (result.words.length === 0 && run !== engines[engines.length - 1]) continue;
           return res.json(result);
         } catch (err) {
           lastErr = err;
+          if (run === gemini) noteGeminiFailure(err);
           console.warn("[Transcribe] engine failed:", (err as Error).message?.slice(0, 300));
         }
       }
@@ -461,6 +707,26 @@ async function startServer() {
       safeUnlink(file?.path);
       safeUnlink(speechFile);
       releaseSlot?.();
+    }
+  });
+
+  // Switch existing captions between scripts (e.g. Hindi <-> Hinglish) without re-transcribing.
+  app.post("/api/transliterate", rateLimit, express.json({ limit: "1mb" }), async (req, res) => {
+    const words = req.body?.words;
+    const target = String(req.body?.target || "");
+    if (!Array.isArray(words) || !words.length || words.length > 5000 || !words.every((w) => typeof w === "string")) {
+      return res.status(400).json({ error: "Invalid caption text." });
+    }
+    if (!expectedScript(target)) return res.status(400).json({ error: "Unsupported target language." });
+    try {
+      const fixed = await fixScript(words.map((word) => ({ word, start: 0, end: 0 })), target);
+      if (fixed.method !== "AI" && target !== "Hinglish") {
+        return res.status(503).json({ error: "The free AI is busy right now. Please try again in a minute." });
+      }
+      res.json({ words: fixed.words.map((w) => w.word), method: fixed.method });
+    } catch (err) {
+      console.error("[Transliterate] error:", err);
+      res.status(502).json({ error: "Could not convert the captions. Please try again." });
     }
   });
 
