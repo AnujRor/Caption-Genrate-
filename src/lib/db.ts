@@ -135,8 +135,15 @@ export async function saveProject(project: Project): Promise<void> {
     record = { ...record, videoPath: record.videoPath ?? existing?.videoPath, ownerId: record.ownerId ?? existing?.ownerId };
   }
   if (userId && !record.ownerId) record.ownerId = userId;
-  await putLocal(record);
-  if (userId && record.ownerId === userId) scheduleCloudSync(record, userId);
+  const syncs = !!userId && record.ownerId === userId;
+  try {
+    await putLocal(record);
+  } catch (err) {
+    // Device storage full: when signed in the cloud copy still keeps the work safe.
+    if (!syncs) throw err;
+    console.warn("[cloud] could not save on this device; saving to the cloud only", err);
+  }
+  if (syncs) scheduleCloudSync(record, userId!);
 }
 
 /** This browser's projects for the current user, merged with their cloud projects when signed in. */

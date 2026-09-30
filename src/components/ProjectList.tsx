@@ -83,13 +83,19 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
         duration: info.duration,
         createdAt: Date.now(),
       };
-      await saveProject(project);
-      // Ask the browser not to auto-delete stored videos when disk space runs low.
-      navigator.storage?.persist?.().catch(() => {});
+      try {
+        await saveProject(project);
+        // Ask the browser not to auto-delete stored videos when disk space runs low.
+        navigator.storage?.persist?.().catch(() => {});
+      } catch (err) {
+        // Phones with little free space (or in-app browsers) can refuse to store the video.
+        // Captioning and export work from memory, so open the editor anyway; it warns that saving failed.
+        console.error('Failed to save project locally; continuing without saving:', err);
+      }
       onSelectProject(project);
     } catch (err) {
-      console.error('Failed to save project:', err);
-      setError('Could not save this video in the browser. Free up some storage space and try again.');
+      console.error('Failed to open video:', err);
+      setError('Could not read this video. Try a different file or browser.');
     } finally {
       setIsImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
