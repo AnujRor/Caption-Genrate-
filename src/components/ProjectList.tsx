@@ -65,6 +65,11 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
       setError('Please choose a video file (MP4, MOV, WEBM).');
       return;
     }
+    // A few KB is only a file header, e.g. a screen recording that was stopped instantly.
+    if (file.size < 20 * 1024) {
+      setError('This video file is empty or damaged (it is only a few KB). Record or download it again.');
+      return;
+    }
     if (file.size > MAX_FILE_MB * 1024 * 1024) {
       setError(`This video is larger than ${MAX_FILE_MB}MB. Please trim or compress it first.`);
       return;

@@ -776,9 +776,18 @@ async function startServer() {
       );
       res.sendFile(out, { headers: { "Content-Type": "video/mp4" } }, () => safeUnlink(out));
     } catch (err) {
-      console.error("[Convert] error:", String((err as any)?.stderr || err).slice(-500));
+      const stderr = String((err as any)?.stderr || err);
+      console.error("[Convert] error:", stderr.slice(-500));
       safeUnlink(out);
-      if (!res.headersSent) res.status(502).json({ error: "Could not convert this video. Try exporting it again as MP4 (H.264)." });
+      // e.g. an OBS recording that was stopped before anything was written.
+      const empty = /does not contain any stream|Invalid data found|moov atom not found/i.test(stderr);
+      if (!res.headersSent) {
+        res.status(empty ? 422 : 502).json({
+          error: empty
+            ? "This video file is empty or damaged, so there is nothing to play. Record or download it again."
+            : "Could not convert this video. Try exporting it again as MP4 (H.264).",
+        });
+      }
     } finally {
       safeUnlink(file?.path);
       releaseSlot?.();
