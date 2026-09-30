@@ -66,14 +66,30 @@ export async function upsertCloudProject(p: Project): Promise<void> {
   if (error) throw error;
 }
 
+// Supabase's free plan rejects files over 50MB, so bigger videos are stored as numbered parts.
+// A split video's videoPath is "<base>#<part count>", with parts at "<base>.part<i>".
+const PART_SIZE = 40 * 1024 * 1024;
+
+function partPaths(videoPath: string): string[] {
+  const m = videoPath.match(/^(.*)#(\d+)$/);
+  if (!m) return [videoPath];
+  return Array.from({ length: Number(m[2]) }, (_, i) => `${m[1]}.part${i}`);
+}
+
 /** Uploads the video and returns its storage path. */
 export async function uploadCloudVideo(userId: string, p: Project): Promise<string> {
   if (!supabase || !p.videoBlob) throw new Error("Nothing to upload");
-  const path = `${userId}/${p.id}`;
-  const { error } = await supabase.storage
-    .from(BUCKET)
-    .upload(path, p.videoBlob, { upsert: true, contentType: p.videoBlob.type || "video/mp4" });
-  if (error) throw error;
+  const blob = p.videoBlob;
+  const base = `${userId}/${p.id}`;
+  const count = Math.max(1, Math.ceil(blob.size / PART_SIZE));
+  const path = count === 1 ? base : `${base}#${count}`;
+  const contentType = blob.type || "video/mp4";
+  const paths = partPaths(path);
+  for (let i = 0; i < paths.length; i++) {
+    const part = count === 1 ? blob : blob.slice(i * PART_SIZE, (i + 1) * PART_SIZE, contentType);
+    const { error } = await supabase.storage.from(BUCKET).upload(paths[i], part, { upsert: true, contentType });
+    if (error) throw error;
+  }
   const { error: rowError } = await supabase.from("projects").update({ video_path: path }).eq("id", p.id);
   if (rowError) throw rowError;
   return path;
@@ -81,14 +97,18 @@ export async function uploadCloudVideo(userId: string, p: Project): Promise<stri
 
 export async function downloadCloudVideo(path: string): Promise<Blob> {
   if (!supabase) throw new Error("Cloud sync is not configured");
-  const { data, error } = await supabase.storage.from(BUCKET).download(path);
-  if (error) throw error;
-  return data;
+  const parts: Blob[] = [];
+  for (const partPath of partPaths(path)) {
+    const { data, error } = await supabase.storage.from(BUCKET).download(partPath);
+    if (error) throw error;
+    parts.push(data);
+  }
+  return parts.length === 1 ? parts[0] : new Blob(parts, { type: parts[0].type || "video/mp4" });
 }
 
 export async function deleteCloudProject(p: Pick<Project, "id" | "videoPath">): Promise<void> {
   if (!supabase) return;
-  if (p.videoPath) await supabase.storage.from(BUCKET).remove([p.videoPath]);
+  if (p.videoPath) await supabase.storage.from(BUCKET).remove(partPaths(p.videoPath));
   const { error } = await supabase.from("projects").delete().eq("id", p.id);
   if (error) throw error;
 }
