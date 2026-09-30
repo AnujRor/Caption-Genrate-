@@ -1,5 +1,7 @@
 import { Project, DEFAULT_STYLES } from "../types";
 import { sanitizePhrases } from "./captionUtils";
+import { currentUserId } from "./supabase";
+import { deleteCloudProject, downloadCloudVideo, fetchCloudProjects, upsertCloudProject, uploadCloudVideo } from "./cloud";
 
 const DB_NAME = "AutoCaptionDB";
 const STORE_NAME = "projects";
@@ -81,16 +83,125 @@ function repairProject(raw: any): Project | null {
   };
 }
 
-export async function saveProject(project: Project): Promise<void> {
-  await run("readwrite", (store) => store.put({ ...project, updatedAt: Date.now() }));
+async function getLocal(id: string): Promise<any> {
+  return run("readonly", (store) => store.get(id));
 }
 
+async function putLocal(project: Project): Promise<void> {
+  await run("readwrite", (store) => store.put(project));
+}
+
+/* ------------------------------ cloud sync ------------------------------ */
+
+const syncTimers = new Map<string, number>();
+const uploading = new Set<string>();
+const uploadFailed = new Set<string>(); // don't retry a failed (e.g. too large) upload on every edit
+
+function scheduleCloudSync(project: Project, userId: string) {
+  window.clearTimeout(syncTimers.get(project.id));
+  syncTimers.set(
+    project.id,
+    window.setTimeout(() => {
+      syncTimers.delete(project.id);
+      syncToCloud(project, userId).catch((err) => console.warn("[cloud] sync failed", err));
+    }, 1500)
+  );
+}
+
+async function syncToCloud(project: Project, userId: string): Promise<void> {
+  await upsertCloudProject(project);
+  if (project.videoPath || !project.videoBlob || uploading.has(project.id) || uploadFailed.has(project.id)) return;
+  uploading.add(project.id);
+  try {
+    const videoPath = await uploadCloudVideo(userId, project);
+    const latest = await getLocal(project.id);
+    if (latest) await putLocal({ ...latest, videoPath });
+  } catch (err) {
+    uploadFailed.add(project.id);
+    console.warn("[cloud] video upload failed; captions still sync, the video stays on this device", err);
+  } finally {
+    uploading.delete(project.id);
+  }
+}
+
+/* ------------------------------ public API ------------------------------ */
+
+export async function saveProject(project: Project): Promise<void> {
+  const userId = await currentUserId();
+  let record: Project = { ...project, updatedAt: Date.now() };
+  // The editor keeps its own copy of the project; don't let it erase sync info set in the background.
+  if (!record.videoPath || !record.ownerId) {
+    const existing = await getLocal(project.id).catch(() => null);
+    record = { ...record, videoPath: record.videoPath ?? existing?.videoPath, ownerId: record.ownerId ?? existing?.ownerId };
+  }
+  if (userId && !record.ownerId) record.ownerId = userId;
+  await putLocal(record);
+  if (userId && record.ownerId === userId) scheduleCloudSync(record, userId);
+}
+
+/** This browser's projects for the current user, merged with their cloud projects when signed in. */
 export async function getProjects(): Promise<Project[]> {
+  const userId = await currentUserId();
   const raw = (await run("readonly", (store) => store.getAll())) as unknown[];
-  const projects = raw.map(repairProject).filter((p): p is Project => p !== null);
+  const local = raw
+    .map(repairProject)
+    .filter((p): p is Project => p !== null)
+    .filter((p) => !p.ownerId || p.ownerId === userId);
+
+  let projects = local;
+  if (userId) {
+    try {
+      const cloud = await fetchCloudProjects(userId);
+      const byId = new Map(local.map((p) => [p.id, p]));
+      for (const remote of cloud) {
+        const mine = byId.get(remote.id);
+        if (!mine) {
+          byId.set(remote.id, repairCloudProject(remote));
+        } else if ((remote.updatedAt || 0) > (mine.updatedAt || 0)) {
+          // Edited on another device: take its captions, keep this device's video.
+          const merged = repairCloudProject({ ...remote, videoBlob: mine.videoBlob });
+          byId.set(remote.id, merged);
+          await putLocal(merged);
+        }
+      }
+      // Projects made while signed out (or not synced yet) are uploaded to this account.
+      const cloudIds = new Set(cloud.map((p) => p.id));
+      for (const p of local) {
+        if (!cloudIds.has(p.id) || !p.ownerId) {
+          const claimed = { ...p, ownerId: userId };
+          await putLocal(claimed);
+          byId.set(p.id, claimed);
+          syncToCloud(claimed, userId).catch((err) => console.warn("[cloud] sync failed", err));
+        }
+      }
+      projects = [...byId.values()];
+    } catch (err) {
+      console.warn("[cloud] could not load cloud projects; showing this device only", err);
+    }
+  }
   return projects.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
 }
 
-export async function deleteProject(id: string): Promise<void> {
-  await run("readwrite", (store) => store.delete(id));
+function repairCloudProject(p: Project): Project {
+  return {
+    ...p,
+    phrases: sanitizePhrases(p.phrases),
+    styles: { ...DEFAULT_STYLES, ...(p.styles && typeof p.styles === "object" ? p.styles : {}) },
+  };
+}
+
+/** Makes sure the project's video is on this device, downloading it from the cloud if needed. */
+export async function ensureVideo(project: Project): Promise<Project> {
+  if (project.videoBlob instanceof Blob) return project;
+  if (!project.videoPath) throw new Error("This video was never uploaded to the cloud, so it only exists on the device that created it.");
+  const videoBlob = await downloadCloudVideo(project.videoPath);
+  const full = { ...project, videoBlob };
+  await putLocal(full);
+  return full;
+}
+
+export async function deleteProject(project: Project): Promise<void> {
+  window.clearTimeout(syncTimers.get(project.id));
+  await run("readwrite", (store) => store.delete(project.id));
+  if (project.ownerId && project.ownerId === (await currentUserId())) await deleteCloudProject(project);
 }

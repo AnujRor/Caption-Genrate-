@@ -7,6 +7,7 @@ import multer from "multer";
 import { execFile } from "child_process";
 import util from "util";
 import { GoogleGenAI, Type } from "@google/genai";
+import ffmpegStatic from "ffmpeg-static";
 import { devanagariToHinglish, expectedScript, needsScriptFix } from "./server/scripts";
 
 const execFileAsync = util.promisify(execFile);
@@ -85,24 +86,57 @@ function safeUnlink(p: string | null | undefined) {
   fs.promises.unlink(p).catch(() => {});
 }
 
+// Use the system ffmpeg when installed, otherwise the copy bundled by the ffmpeg-static
+// package, so audio extraction works on any PC without a manual ffmpeg install.
+let ffmpegBin: Promise<string | null> | null = null;
+function getFfmpeg(): Promise<string | null> {
+  ffmpegBin ??= (async () => {
+    for (const bin of ["ffmpeg", ffmpegStatic as unknown as string | null]) {
+      if (!bin) continue;
+      try {
+        await execFileAsync(bin, ["-version"], { timeout: 15_000 });
+        console.log(`[ffmpeg] using ${bin === "ffmpeg" ? "system ffmpeg" : bin}`);
+        return bin;
+      } catch {
+        /* try the next one */
+      }
+    }
+    console.warn("[ffmpeg] not found; long videos may fail. Run `npm install` to get the bundled copy.");
+    return null;
+  })();
+  return ffmpegBin;
+}
+
 async function probeDuration(file: string): Promise<number | null> {
   try {
     const { stdout } = await execFileAsync("ffprobe", [
       "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file,
     ]);
     const d = parseFloat(stdout.trim());
-    return Number.isFinite(d) && d > 0 ? d : null;
+    if (Number.isFinite(d) && d > 0) return d;
   } catch {
-    return null;
+    /* ffprobe missing: read the duration from ffmpeg's banner instead */
   }
+  const ffmpeg = await getFfmpeg();
+  if (!ffmpeg) return null;
+  // `ffmpeg -i` with no output exits with an error but prints "Duration: HH:MM:SS.xx".
+  const stderr: string = await execFileAsync(ffmpeg, ["-hide_banner", "-i", file], { timeout: 30_000 })
+    .then((r) => r.stderr)
+    .catch((err) => String(err?.stderr || ""));
+  const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  const d = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+  return d > 0 ? d : null;
 }
 
 // Compress any audio/video into small mono 16kHz MP3: fast upload, same speech accuracy.
 async function toSpeechMp3(input: string): Promise<string | null> {
   const out = `${input}_speech.mp3`;
+  const ffmpeg = await getFfmpeg();
+  if (!ffmpeg) return null;
   try {
     await execFileAsync(
-      "ffmpeg",
+      ffmpeg,
       ["-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", out],
       { timeout: 5 * 60 * 1000 }
     );
@@ -255,10 +289,18 @@ async function transcribeGroqFor(file: string, language: string): Promise<Transc
       } else {
         // English speech forced into Hindi mode comes out as English spelled in Devanagari,
         // so read the Hindi-mode text to decide. Confidence scores are only the fallback.
-        const verdict = await identifyLanguage(hindi.words.map((w) => w.word).join(" "));
         const moreWords = hindi.words.length > best.words.length * 1.25;
-        useHindi = verdict ? verdict !== "English" : hindi.score > best.score + 0.1 || (moreWords && hindi.score > best.score);
-        reason = verdict ? `text looks like ${verdict}` : "score";
+        // Real Hindi/Hinglish speech gains words in Hindi mode (English mode drops them);
+        // English speech loses words when forced into Hindi, so that result can't win.
+        const lostWords = hindi.words.length < best.words.length * 0.8;
+        if (lostWords) {
+          useHindi = false;
+          reason = "Hindi pass lost words";
+        } else {
+          const verdict = await identifyLanguage(hindi.words.map((w) => w.word).join(" "));
+          useHindi = verdict ? verdict !== "English" : hindi.score > best.score + 0.1 || (moreWords && hindi.score > best.score);
+          reason = verdict ? `text looks like ${verdict}` : "score";
+        }
       }
       console.log(
         `[Auto-detect] Whisper said ${best.detectedLanguage} (score ${best.score.toFixed(3)}, ${best.words.length} words); ` +
@@ -756,8 +798,19 @@ async function startServer() {
     });
   }
 
+  getFfmpeg(); // locate ffmpeg now so the first upload doesn't pay for it
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}  (groq=${!!GROQ_KEY}, gemini=${!!GEMINI_KEY})`);
+  });
+  // Without this, a busy port lands in the uncaughtException logger and the process
+  // lingers without serving anything.
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`[server] Port ${PORT} is already in use. Close the other running copy of the app, or start with a different PORT.`);
+    } else {
+      console.error("[server] failed to listen:", err);
+    }
+    process.exit(1);
   });
   // Node closes requests after 5 minutes by default, which kills long uploads + transcriptions.
   server.requestTimeout = 20 * 60 * 1000;

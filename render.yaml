@@ -8,3 +8,7 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: VITE_SUPABASE_URL
+        value: https://ciwpsfodxzpvrkvsqzfy.supabase.co
+      - key: VITE_SUPABASE_PUBLISHABLE_KEY
+        value: sb_publishable_xcsAf9JXQRumfwHygnxlPw_uCoHvvMq

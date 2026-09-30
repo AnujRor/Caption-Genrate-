@@ -1,8 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Project, DEFAULT_STYLES } from '../types';
-import { getProjects, saveProject, deleteProject } from '../lib/db';
-import { Plus, Film, Trash2, UploadCloud, Sparkles, Languages, Download, Loader2, AlertTriangle, Captions } from 'lucide-react';
+import type { User } from '@supabase/supabase-js';
+import { getProjects, saveProject, deleteProject, ensureVideo } from '../lib/db';
+import { supabase } from '../lib/supabase';
+import { Plus, Film, Trash2, UploadCloud, Sparkles, Languages, Download, Loader2, AlertTriangle, Captions, CloudDownload } from 'lucide-react';
 import { cn, formatDuration, readVideoInfo } from '../lib/utils';
+import AuthButton from './AuthButton';
 
 interface ProjectListProps {
   onSelectProject: (project: Project) => void;
@@ -18,7 +21,19 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [serverWarning, setServerWarning] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [openingId, setOpeningId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!supabase) return;
+    // Fires once on load with the stored session, then on every sign-in / sign-out.
+    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      setUser(session?.user ?? null);
+      if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') loadProjects();
+    });
+    return () => data.subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     loadProjects();
@@ -81,7 +96,23 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
     }
   };
 
-  const handleDelete = async (e: React.MouseEvent, id: string) => {
+  const openProject = async (project: Project) => {
+    if (openingId) return;
+    if (project.videoBlob) return onSelectProject(project);
+    setError(null);
+    setOpeningId(project.id);
+    try {
+      onSelectProject(await ensureVideo(project));
+    } catch (err: any) {
+      console.error('Failed to download video:', err);
+      setError(err?.message || 'Could not download this video from the cloud. Check your connection and try again.');
+    } finally {
+      setOpeningId(null);
+    }
+  };
+
+  const handleDelete = async (e: React.MouseEvent, project: Project) => {
+    const id = project.id;
     e.stopPropagation();
     if (confirmDelete !== id) {
       setConfirmDelete(id);
@@ -91,7 +122,7 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
     setConfirmDelete(null);
     setProjects((list) => list.filter((p) => p.id !== id));
     try {
-      await deleteProject(id);
+      await deleteProject(project);
     } catch {
       loadProjects();
     }
@@ -125,10 +156,13 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
             </div>
             <span className="font-display font-extrabold text-lg tracking-tight">AutoCaption<span className="text-violet-400"> Studio</span></span>
           </div>
-          <button onClick={openPicker} disabled={isImporting} className="btn-primary px-4 py-2.5 text-sm">
-            {isImporting ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
-            <span className="hidden sm:inline">New project</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <AuthButton user={user} />
+            <button onClick={openPicker} disabled={isImporting} className="btn-primary px-4 py-2.5 text-sm">
+              {isImporting ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
+              <span className="hidden sm:inline">New project</span>
+            </button>
+          </div>
         </header>
 
         <section className="pt-8 sm:pt-14 pb-10 text-center animate-fadeUp">
@@ -216,8 +250,8 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
                   key={project.id}
                   role="button"
                   tabIndex={0}
-                  onClick={() => onSelectProject(project)}
-                  onKeyDown={(e) => e.key === 'Enter' && onSelectProject(project)}
+                  onClick={() => openProject(project)}
+                  onKeyDown={(e) => e.key === 'Enter' && openProject(project)}
                   style={{ animationDelay: `${Math.min(i, 8) * 40}ms` }}
                   className="group relative panel overflow-hidden cursor-pointer transition-all duration-200 hover:-translate-y-1 hover:border-violet-500/40 hover:shadow-xl hover:shadow-violet-900/20 animate-fadeUp"
                 >
@@ -233,6 +267,12 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
                     {project.duration ? (
                       <span className="absolute bottom-2 right-2 text-[10px] font-mono bg-black/70 px-1.5 py-0.5 rounded">{formatDuration(project.duration)}</span>
                     ) : null}
+                    {!project.videoBlob && (
+                      <span className="absolute inset-0 flex items-center justify-center gap-1.5 text-xs font-medium bg-black/50">
+                        {openingId === project.id ? <Loader2 size={16} className="animate-spin" /> : <CloudDownload size={16} />}
+                        {openingId === project.id ? 'Downloading…' : 'In cloud'}
+                      </span>
+                    )}
                     {project.phrases.length > 0 && (
                       <span className="absolute bottom-2 left-2 text-[10px] font-semibold bg-emerald-500/90 text-black px-1.5 py-0.5 rounded">Captioned</span>
                     )}
@@ -242,7 +282,7 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
                     <p className="text-[11px] text-zinc-500 mt-0.5">{new Date(project.updatedAt || project.createdAt).toLocaleDateString()}</p>
                   </div>
                   <button
-                    onClick={(e) => handleDelete(e, project.id)}
+                    onClick={(e) => handleDelete(e, project)}
                     className={cn(
                       'absolute right-2 bottom-2.5 p-1.5 rounded-lg transition-all text-xs flex items-center gap-1',
                       confirmDelete === project.id

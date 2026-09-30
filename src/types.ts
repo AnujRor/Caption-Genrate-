@@ -33,7 +33,9 @@ export interface StyleOptions {
 export interface Project {
   id: string;
   name: string;
-  videoBlob: Blob;
+  videoBlob?: Blob; // missing for a cloud project not yet downloaded to this device
+  videoPath?: string; // Supabase Storage path once the video is uploaded
+  ownerId?: string; // Supabase user who owns it; unset for projects made while signed out
   phrases: Phrase[];
   styles: StyleOptions;
   detectedLanguage?: string;
