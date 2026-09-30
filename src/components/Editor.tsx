@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { Project, StyleOptions, DEFAULT_STYLES } from '../types';
 import { ChevronLeft, Download, FileText, Loader2, Pause, Play, Captions, Clock, Palette, CheckCircle2, AlertTriangle, X, Undo2, Redo2 } from 'lucide-react';
 import { cn, formatTime, loadPref, savePref } from '../lib/utils';
-import { saveProject } from '../lib/db';
+import { resetVideo, saveProject } from '../lib/db';
 import { prepareUpload } from '../lib/audioExtractor';
 import { buildPhrases, downloadBlob, repairWords, retimePhrase, sanitizePhrases, toSrt } from '../lib/captionUtils';
 import { drawCaptions, ensureFontLoaded, findActive, FONTS } from '../lib/captionRenderer';
@@ -223,6 +223,38 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
     setVideoUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [project.videoBlob]);
+
+  // Some downloaded videos use codecs the browser can't show (black picture). Convert those
+  // once on the server into a plain MP4 and swap it in.
+  const convertTried = useRef(false);
+  const [isConverting, setIsConverting] = useState(false);
+  const convertVideo = useCallback(async () => {
+    const blob = projectRef.current.videoBlob;
+    if (convertTried.current || !blob) return;
+    convertTried.current = true;
+    setIsConverting(true);
+    setNotice({ kind: 'info', text: 'This video format does not play in your browser. Converting it to MP4, please wait…' });
+    try {
+      await wakeServer(() => {});
+      const form = new FormData();
+      form.append('video', blob, `${projectRef.current.name || 'video'}.mp4`);
+      const res = await fetch('/api/convert', { method: 'POST', body: form });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error || `Conversion failed (${res.status})`);
+      }
+      const converted = await res.blob();
+      // Drop the old cloud copy so the converted file is uploaded in its place.
+      await resetVideo(projectRef.current);
+      commit((p) => ({ ...p, videoBlob: new Blob([converted], { type: 'video/mp4' }), videoPath: undefined }), true);
+      setNotice({ kind: 'success', text: 'Video converted. It should play now.' });
+    } catch (err: any) {
+      console.error('Video conversion failed', err);
+      setNotice({ kind: 'error', text: err?.message || 'Could not convert this video. Try exporting it again as MP4 (H.264).' });
+    } finally {
+      setIsConverting(false);
+    }
+  }, [commit]);
 
   useEffect(() => {
     ensureFontLoaded(project.styles.fontFamily);
@@ -696,9 +728,11 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
                 className="absolute inset-0 w-full h-full object-contain"
                 playsInline
                 preload="auto"
+                onError={() => convertVideo()}
                 onLoadedMetadata={(e) => {
                   const v = e.currentTarget;
                   if (v.videoWidth && v.videoHeight) setVideoSize({ w: v.videoWidth, h: v.videoHeight });
+                  else convertVideo(); // audio decodes but the picture can't: black video
                   if (!project.duration && Number.isFinite(v.duration)) commit((p) => ({ ...p, duration: v.duration }));
                 }}
                 onPlay={() => setIsPlaying(true)}
@@ -707,6 +741,13 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
                 onClick={togglePlay}
               />
               <canvas ref={overlayRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+
+              {isConverting && (
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-black/70 text-sm text-zinc-200">
+                  <Loader2 size={26} className="animate-spin text-violet-400" />
+                  Converting video…
+                </div>
+              )}
 
               {!isPlaying && !isExporting && (
                 <button onClick={togglePlay} className="absolute inset-0 flex items-center justify-center bg-black/25 transition-opacity" aria-label="Play">

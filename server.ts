@@ -752,6 +752,39 @@ async function startServer() {
     }
   });
 
+  // Re-encode videos the browser can't decode (HEVC, AV1, odd downloader output) into plain H.264 MP4.
+  app.post("/api/convert", rateLimit, upload.single("video"), async (req, res) => {
+    const file = req.file;
+    const out = file ? `${file.path}_web.mp4` : null;
+    let releaseSlot: (() => void) | null = null;
+    try {
+      if (!file || !out) return res.status(400).json({ error: "No video received." });
+      const ffmpeg = await getFfmpeg();
+      if (!ffmpeg) return res.status(503).json({ error: "Video conversion is not available on this server." });
+      console.log(`[Convert] ${file.originalname} ${(file.size / 1048576).toFixed(1)}MB`);
+      releaseSlot = await acquireJobSlot();
+      await execFileAsync(
+        ffmpeg,
+        [
+          "-y", "-i", file.path,
+          // Even dimensions are required by yuv420p; cap at 1080p so free hosts finish in time.
+          "-vf", "scale='min(1080,iw)':-2",
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+          "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out,
+        ],
+        { timeout: 10 * 60 * 1000, maxBuffer: 16 * 1024 * 1024 }
+      );
+      res.sendFile(out, { headers: { "Content-Type": "video/mp4" } }, () => safeUnlink(out));
+    } catch (err) {
+      console.error("[Convert] error:", String((err as any)?.stderr || err).slice(-500));
+      safeUnlink(out);
+      if (!res.headersSent) res.status(502).json({ error: "Could not convert this video. Try exporting it again as MP4 (H.264)." });
+    } finally {
+      safeUnlink(file?.path);
+      releaseSlot?.();
+    }
+  });
+
   // Switch existing captions between scripts (e.g. Hindi <-> Hinglish) without re-transcribing.
   app.post("/api/transliterate", rateLimit, express.json({ limit: "1mb" }), async (req, res) => {
     const words = req.body?.words;

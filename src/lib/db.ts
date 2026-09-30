@@ -1,7 +1,7 @@
 import { Project, DEFAULT_STYLES } from "../types";
 import { sanitizePhrases } from "./captionUtils";
 import { currentUserId } from "./supabase";
-import { deleteCloudProject, downloadCloudVideo, fetchCloudProjects, upsertCloudProject, uploadCloudVideo } from "./cloud";
+import { deleteCloudProject, deleteCloudVideo, downloadCloudVideo, fetchCloudProjects, upsertCloudProject, uploadCloudVideo } from "./cloud";
 
 const DB_NAME = "AutoCaptionDB";
 const STORE_NAME = "projects";
@@ -205,6 +205,17 @@ export async function ensureVideo(project: Project): Promise<Project> {
   const full = { ...project, videoBlob };
   await putLocal(full);
   return full;
+}
+
+/** Call before replacing a project's video, so the new file gets uploaded instead of the old one kept. */
+export async function resetVideo(project: Project): Promise<void> {
+  uploadFailed.delete(project.id);
+  const existing = await getLocal(project.id).catch(() => null);
+  const videoPath = project.videoPath || existing?.videoPath;
+  if (existing) await putLocal({ ...existing, videoPath: undefined }).catch(() => {});
+  if (videoPath && project.ownerId && project.ownerId === (await currentUserId())) {
+    await deleteCloudVideo(project.id, videoPath).catch((err) => console.warn("[cloud] could not remove old video", err));
+  }
 }
 
 export async function deleteProject(project: Project): Promise<void> {

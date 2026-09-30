@@ -106,6 +106,13 @@ export async function downloadCloudVideo(path: string): Promise<Blob> {
   return parts.length === 1 ? parts[0] : new Blob(parts, { type: parts[0].type || "video/mp4" });
 }
 
+/** Removes a project's uploaded video so a replacement can be uploaded. */
+export async function deleteCloudVideo(id: string, videoPath: string): Promise<void> {
+  if (!supabase) return;
+  await supabase.from("projects").update({ video_path: null }).eq("id", id);
+  await supabase.storage.from(BUCKET).remove(partPaths(videoPath));
+}
+
 export async function deleteCloudProject(p: Pick<Project, "id" | "videoPath">): Promise<void> {
   if (!supabase) return;
   if (p.videoPath) await supabase.storage.from(BUCKET).remove(partPaths(p.videoPath));
