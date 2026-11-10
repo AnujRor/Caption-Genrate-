@@ -6,6 +6,7 @@ import { supabase } from '../lib/supabase';
 import { Plus, Film, Trash2, UploadCloud, Sparkles, Languages, Download, Loader2, AlertTriangle, Captions, CloudDownload } from 'lucide-react';
 import { cn, formatDuration, readVideoInfo } from '../lib/utils';
 import AuthButton from './AuthButton';
+import LandingContent, { SiteFooter } from './LandingContent';
 
 interface ProjectListProps {
   onSelectProject: (project: Project) => void;
@@ -157,35 +158,78 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
         importFile(e.dataTransfer.files?.[0]);
       }}
     >
-      <input type="file" accept="video/*" className="hidden" ref={fileInputRef} onChange={(e) => importFile(e.target.files?.[0])} />
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-violet-600 focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
+      >
+        Skip to content
+      </a>
+
+      <input
+        type="file"
+        accept="video/*"
+        className="hidden"
+        ref={fileInputRef}
+        aria-label="Upload a video file to generate captions"
+        onChange={(e) => importFile(e.target.files?.[0])}
+      />
 
       <div className="max-w-6xl mx-auto px-4 sm:px-6 pb-16">
-        <header className="flex items-center justify-between py-5">
-          <div className="flex items-center gap-2.5">
+        <header className="flex items-center justify-between gap-3 py-5">
+          <a href="/" className="flex items-center gap-2.5" aria-label="AutoCaption Studio home">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 flex items-center justify-center shadow-lg shadow-violet-600/30">
-              <Captions size={18} className="text-white" />
+              <Captions size={18} className="text-white" aria-hidden="true" />
             </div>
             <span className="font-display font-extrabold text-lg tracking-tight">AutoCaption<span className="text-violet-400"> Studio</span></span>
-          </div>
+          </a>
           <div className="flex items-center gap-2">
+            <nav aria-label="Primary" className="hidden items-center gap-1 md:flex">
+              {[
+                ['#features', 'Features'],
+                ['#how-it-works', 'How it works'],
+                ['#languages', 'Languages'],
+                ['#faq', 'FAQ'],
+              ].map(([href, label]) => (
+                <a
+                  key={href}
+                  href={href}
+                  className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:bg-white/5 hover:text-white"
+                >
+                  {label}
+                </a>
+              ))}
+            </nav>
             <AuthButton user={user} />
-            <button onClick={openPicker} disabled={isImporting} className="btn-primary px-4 py-2.5 text-sm">
-              {isImporting ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
+            <button
+              type="button"
+              onClick={openPicker}
+              disabled={isImporting}
+              className="btn-primary px-4 py-2.5 text-sm"
+              aria-label="Create a new caption project"
+            >
+              {isImporting ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Plus size={16} aria-hidden="true" />}
               <span className="hidden sm:inline">New project</span>
             </button>
           </div>
         </header>
 
-        <section className="pt-8 sm:pt-14 pb-10 text-center animate-fadeUp">
+        <main id="main-content">
+
+        <section aria-labelledby="hero-title" className="pt-8 sm:pt-14 pb-10 text-center animate-fadeUp">
           <div className="inline-flex items-center gap-1.5 text-[11px] font-medium text-violet-300 bg-violet-500/10 border border-violet-500/20 rounded-full px-3 py-1 mb-5">
-            <Sparkles size={12} /> Free AI captions · Hindi, Hinglish, English & 25+ languages
+            <Sparkles size={12} aria-hidden="true" /> Free AI captions · Hindi, Hinglish, English &amp; 25+ languages
           </div>
-          <h1 className="font-display font-black text-3xl sm:text-5xl tracking-tight leading-[1.1]">
-            Viral-style captions,<br />
-            <span className="text-gradient">perfectly synced to your voice.</span>
+          <h1
+            id="hero-title"
+            className="font-display font-black text-3xl sm:text-5xl tracking-tight leading-[1.1]"
+          >
+            Free AI video caption generator{' '}
+            <br />
+            <span className="text-gradient">for Hindi, Hinglish &amp; English.</span>
           </h1>
           <p className="mt-4 text-sm sm:text-base text-zinc-400 max-w-xl mx-auto">
-            Upload a video, get word-by-word animated subtitles in seconds, style them, and export a ready-to-post video.
+            Upload a video, get word-by-word animated subtitles in seconds, style them, and export a ready-to-post MP4 or
+            SRT file — free, with no watermark.
           </p>
         </section>
 
@@ -204,45 +248,61 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
           </div>
         )}
 
-        <button
-          onClick={openPicker}
-          disabled={isImporting}
-          className={cn(
-            'group w-full rounded-2xl border-2 border-dashed transition-all duration-200 py-12 sm:py-16 px-6 flex flex-col items-center gap-4',
-            isDragging
-              ? 'border-violet-400 bg-violet-500/10 scale-[1.01]'
-              : 'border-white/10 bg-white/[0.02] hover:border-violet-500/50 hover:bg-violet-500/[0.04]'
-          )}
-        >
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-600/20 to-fuchsia-600/20 border border-violet-500/30 flex items-center justify-center text-violet-300 group-hover:scale-110 transition-transform">
-            {isImporting ? <Loader2 size={28} className="animate-spin" /> : <UploadCloud size={28} />}
-          </div>
-          <div>
-            <p className="font-semibold text-base sm:text-lg">{isImporting ? 'Preparing your video…' : isDragging ? 'Drop it here' : 'Drop a video or click to upload'}</p>
-            <p className="text-xs text-zinc-500 mt-1">MP4, MOV or WEBM · Reels, Shorts, landscape — any size up to {MAX_FILE_MB}MB</p>
-          </div>
-        </button>
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
-          {[
-            { icon: Sparkles, title: 'Accurate AI timing', text: 'Whisper + Gemini word-level sync' },
-            { icon: Languages, title: '25+ languages', text: 'Hindi, Hinglish, Punjabi, Tamil…' },
-            { icon: Download, title: 'Export video + SRT', text: 'Burned-in captions in full quality' },
-          ].map(({ icon: Icon, title, text }) => (
-            <div key={title} className="panel p-4 flex items-center gap-3">
-              <div className="w-9 h-9 rounded-lg bg-white/5 flex items-center justify-center text-violet-300 shrink-0">
-                <Icon size={17} />
-              </div>
-              <div>
-                <p className="text-sm font-semibold">{title}</p>
-                <p className="text-xs text-zinc-500">{text}</p>
-              </div>
+        <section aria-labelledby="upload-title">
+          <h2 id="upload-title" className="sr-only">
+            Upload a video to generate AI captions
+          </h2>
+          <button
+            type="button"
+            onClick={openPicker}
+            disabled={isImporting}
+            aria-label="Upload a video to generate captions"
+            className={cn(
+              'group w-full rounded-2xl border-2 border-dashed transition-all duration-200 py-12 sm:py-16 px-6 flex flex-col items-center gap-4',
+              isDragging
+                ? 'border-violet-400 bg-violet-500/10 scale-[1.01]'
+                : 'border-white/10 bg-white/[0.02] hover:border-violet-500/50 hover:bg-violet-500/[0.04]'
+            )}
+          >
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-600/20 to-fuchsia-600/20 border border-violet-500/30 flex items-center justify-center text-violet-300 group-hover:scale-110 transition-transform">
+              {isImporting ? (
+                <Loader2 size={28} className="animate-spin" aria-hidden="true" />
+              ) : (
+                <UploadCloud size={28} aria-hidden="true" />
+              )}
             </div>
-          ))}
-        </div>
+            <div>
+              <p className="font-semibold text-base sm:text-lg">{isImporting ? 'Preparing your video…' : isDragging ? 'Drop it here' : 'Drop a video or click to upload'}</p>
+              <p className="text-xs text-zinc-500 mt-1">MP4, MOV or WEBM · Reels, Shorts, landscape — any size up to {MAX_FILE_MB}MB</p>
+            </div>
+          </button>
+        </section>
 
-        <section className="mt-12">
-          <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-4">Your projects</h2>
+        <section aria-labelledby="highlights-title" className="mt-4">
+          <h2 id="highlights-title" className="sr-only">
+            Why creators choose AutoCaption Studio
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[
+              { icon: Sparkles, title: 'Accurate AI timing', text: 'Whisper + Gemini word-level sync' },
+              { icon: Languages, title: '25+ languages', text: 'Hindi, Hinglish, Punjabi, Tamil…' },
+              { icon: Download, title: 'Export video + SRT', text: 'Burned-in captions in full quality' },
+            ].map(({ icon: Icon, title, text }) => (
+              <div key={title} className="panel p-4 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-white/5 flex items-center justify-center text-violet-300 shrink-0">
+                  <Icon size={17} aria-hidden="true" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold">{title}</h3>
+                  <p className="text-xs text-zinc-500">{text}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section id="projects" aria-labelledby="projects-title" className="mt-12">
+          <h2 id="projects-title" className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-4">Your projects</h2>
           {isLoading ? (
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
               {[0, 1, 2, 3].map((i) => (
@@ -268,7 +328,13 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
                 >
                   <div className="aspect-video bg-black/60 relative overflow-hidden">
                     {project.thumbnail ? (
-                      <img src={project.thumbnail} alt="" className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" />
+                      <img
+                        src={project.thumbnail}
+                        alt={project.name ? `Thumbnail of ${project.name}` : 'Video project thumbnail'}
+                        loading="lazy"
+                        decoding="async"
+                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                      />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-zinc-700">
                         <Film size={32} />
@@ -310,6 +376,11 @@ export default function ProjectList({ onSelectProject }: ProjectListProps) {
             </div>
           )}
         </section>
+
+        <LandingContent onUpload={openPicker} isImporting={isImporting} />
+        </main>
+
+        <SiteFooter />
       </div>
     </div>
   );

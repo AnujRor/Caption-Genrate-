@@ -96,13 +96,30 @@ The server (`server.ts`) handles the heavy lifting: file upload, ffmpeg audio ex
 
 ```
 ├── server.ts                 # Express API + Gemini transcription + ffmpeg
+├── index.html                # Meta tags, Open Graph, JSON-LD structured data
+├── public/
+│   ├── robots.txt            # Crawler rules + sitemap reference
+│   ├── sitemap.xml           # Indexable URLs
+│   ├── og-image.png          # 1200×630 social preview image
+│   ├── icon-192.png / icon-512.png / apple-touch-icon.png / favicon-32.png
+│   ├── favicon.svg           # Scalable app icon
+│   ├── site.webmanifest      # PWA manifest
+│   ├── 404.html              # No-index not-found page
+│   └── llms.txt              # Summary for AI search engines
+├── scripts/
+│   ├── prerender.tsx         # Renders landing HTML, injects verification tags + IndexNow key
+│   ├── check-seo.mjs         # 20-point SEO audit of dist/ (runs in CI)
+│   ├── indexnow.mjs          # Instant indexing ping for Bing/Yandex/Seznam/Naver
+│   └── generate-seo-assets.ps1 # Regenerates OG image and icons
 ├── src/
 │   ├── App.tsx               # App shell / routing
 │   ├── components/
-│   │   ├── ProjectList.tsx   # Project gallery
+│   │   ├── ProjectList.tsx   # Landing page + project gallery
+│   │   ├── LandingContent.tsx# SEO content: features, how-to, languages, FAQ
 │   │   ├── Editor.tsx        # Caption editor & export
 │   │   └── EditorPanels.tsx  # Captions / timing / style panels
 │   └── lib/
+│       ├── seo.ts            # Site metadata, FAQ copy and useSeo hook
 │       ├── captionUtils.ts   # Phrases, SRT builder, word repair
 │       ├── captionRenderer.ts# Canvas caption renderer + font presets
 │       ├── audioExtractor.ts # Client-side upload prep
@@ -110,6 +127,8 @@ The server (`server.ts`) handles the heavy lifting: file upload, ffmpeg audio ex
 │       ├── db.ts             # IndexedDB + cloud sync
 │       ├── cloud.ts          # Supabase storage adapter
 │       └── supabase.ts       # Optional auth
+├── docs/
+│   └── off-page-seo.md       # Search Console, IndexNow, backlinks and launch kit
 ├── Dockerfile                # Production image (Node 20 + ffmpeg)
 ├── render.yaml               # Render blueprint
 └── vite.config.ts
@@ -178,6 +197,10 @@ This repo ships with a `Dockerfile` (includes **FFmpeg**) and a `render.yaml` bl
 | `GEMINI_API_KEY` | ✅ Yes | Google Gemini API key from [AI Studio](https://aistudio.google.com/apikey) |
 | `PORT` | No | Server port (Render injects this automatically; defaults to 3000) |
 | `SUPABASE_URL` / `SUPABASE_ANON_KEY` | No | Optional cloud sync backend |
+| `VITE_SITE_URL` / `SITE_URL` | No | Canonical production URL. Defaults to the Render URL; when set, the build rewrites canonical, Open Graph, `robots.txt` and `sitemap.xml` |
+| `GOOGLE_SITE_VERIFICATION` / `VITE_GOOGLE_SITE_VERIFICATION` | No | Google Search Console HTML-tag token, injected as `<meta name="google-site-verification">` |
+| `BING_SITE_VERIFICATION` / `VITE_BING_SITE_VERIFICATION` | No | Bing Webmaster token, injected as `<meta name="msvalidate.01">` |
+| `INDEXNOW_KEY` | No | Overrides the default IndexNow key; the build writes `<key>.txt` into `dist/` |
 | `NODE_ENV` | No | `production` (set automatically in the Docker image) |
 
 ---
@@ -190,7 +213,57 @@ This repo ships with a `Dockerfile` (includes **FFmpeg**) and a `render.yaml` bl
 | `npm run build` | Production build (frontend + bundled server) |
 | `npm start` | Run the production server |
 | `npm run lint` | TypeScript type-check |
+| `npm run seo:check` | Audit `dist/` SEO after a build (title, headings, schema, sitemap, OG image, IndexNow key) |
+| `npm run seo:indexnow` | Ping IndexNow partners after a deploy (optionally pass URLs) |
 | `npm run preview` | Preview the Vite build |
+
+---
+
+## 🔍 SEO
+
+The landing page ships with complete on-page SEO:
+
+| Area | Implementation |
+|------|----------------|
+| Title & description | Keyword-focused `<title>` (63 chars) and meta description (156 chars) in `index.html`, kept in sync by `src/lib/seo.ts` |
+| Keywords | `meta name="keywords"` plus natural keyword coverage in headings and body copy |
+| Canonical | `<link rel="canonical">`, `hreflang` and matching Open Graph URLs |
+| Social | Open Graph + Twitter `summary_large_image` with a generated 1200×630 `og-image.png` |
+| Headings | Exactly one `<h1>`; section `<h2>`s; feature/step/language/FAQ `<h3>`s |
+| Structured data | `WebApplication`, `WebSite`, `Organization`, `FAQPage` and `HowTo` JSON-LD |
+| Content | Features, how-it-works, 28 languages, six use cases, seven FAQs, CTA and footer |
+| Crawlers | `robots.txt`, `sitemap.xml`, `llms.txt`, `site.webmanifest`, semantic landmarks, skip link |
+| Performance | gzip compression, preconnect to Google Fonts, lazy-loaded editor chunk, lazy project thumbnails |
+| Rendering | `scripts/prerender.tsx` renders the landing page into `dist/index.html` at build time so crawlers get full HTML without running JS |
+| Verification | Google Search Console and Bing Webmaster meta tags are injected from env vars — no HTML edits needed |
+| Indexing | `npm run seo:indexnow` instantly notifies Bing/Yandex/Seznam/Naver after each deploy |
+| Errors | Unknown paths return a real `404` page instead of a soft-404 copy of the home page |
+
+Run `npm run seo:check` after `npm run build` to verify all 20 checks still pass;
+CI runs it on every push.
+
+### Off-page SEO
+
+Search Console/Bing submission, IndexNow usage, GitHub repo optimization,
+copy-paste launch posts, directory targets, anchor-text guidance and a 30-day
+plan live in **[docs/off-page-seo.md](docs/off-page-seo.md)**.
+
+### Set your production domain
+
+The canonical URL defaults to `https://caption-generator-9ch5.onrender.com`. For a
+custom domain, set `VITE_SITE_URL` (or `SITE_URL`) in the build environment —
+`scripts/prerender.tsx` rewrites the canonical, Open Graph, Twitter and JSON-LD
+URLs in `dist/index.html` plus `robots.txt` and `sitemap.xml` automatically. You
+can also change the fallback in `src/lib/seo.ts` (`SITE_URL`).
+
+### After deploying
+
+1. Run `npm run seo:indexnow` to notify Bing, Yandex, Seznam and Naver instantly.
+2. Verify the site in [Google Search Console](https://search.google.com/search-console) and submit `https://your-domain/sitemap.xml`.
+3. Do the same in [Bing Webmaster Tools](https://www.bing.com/webmasters).
+4. Preview a link in WhatsApp, X/Twitter or Facebook and check the Open Graph image appears.
+5. Regenerate the social image and icons after branding changes: `powershell -ExecutionPolicy Bypass -File scripts/generate-seo-assets.ps1`.
+6. Rebuild (`npm run build`) so the prerendered HTML is refreshed, then run `npm run seo:check`.
 
 ---
 

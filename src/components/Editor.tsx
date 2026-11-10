@@ -687,8 +687,13 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
       {/* Header */}
       <header className="h-14 shrink-0 border-b border-white/5 bg-ink-900/80 backdrop-blur flex items-center justify-between px-2 sm:px-4 gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
-          <button onClick={handleBack} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 transition-colors" title="Back to projects">
-            <ChevronLeft size={20} />
+          <button
+            onClick={handleBack}
+            className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+            title="Back to projects"
+            aria-label="Back to projects"
+          >
+            <ChevronLeft size={20} aria-hidden="true" />
           </button>
           <input
             value={project.name}
@@ -696,18 +701,37 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
             onBlur={(e) => !e.target.value.trim() && commit((p) => ({ ...p, name: 'Untitled video' }))}
             className="bg-transparent font-semibold text-sm sm:text-base truncate min-w-0 w-full max-w-[40vw] sm:max-w-xs rounded-md px-1.5 py-1 outline-none hover:bg-white/5 focus:bg-white/5"
             title="Rename project"
+            aria-label="Project name"
           />
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <div className="flex items-center">
-            <button onClick={undo} disabled={isExporting || !past.current.length} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 disabled:opacity-30 disabled:pointer-events-none" title="Undo (Ctrl+Z)">
-              <Undo2 size={16} />
+            <button
+              onClick={undo}
+              disabled={isExporting || !past.current.length}
+              className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 disabled:opacity-30 disabled:pointer-events-none"
+              title="Undo (Ctrl+Z)"
+              aria-label="Undo"
+            >
+              <Undo2 size={16} aria-hidden="true" />
             </button>
-            <button onClick={redo} disabled={isExporting || !future.current.length} className="hidden sm:block p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 disabled:opacity-30 disabled:pointer-events-none" title="Redo (Ctrl+Shift+Z)">
-              <Redo2 size={16} />
+            <button
+              onClick={redo}
+              disabled={isExporting || !future.current.length}
+              className="hidden sm:block p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 disabled:opacity-30 disabled:pointer-events-none"
+              title="Redo (Ctrl+Shift+Z)"
+              aria-label="Redo"
+            >
+              <Redo2 size={16} aria-hidden="true" />
             </button>
           </div>
-          <button onClick={downloadSrt} disabled={isExporting} className="btn-ghost px-3 py-2 text-xs" title="Download subtitles (.srt)">
+          <button
+            onClick={downloadSrt}
+            disabled={isExporting}
+            className="btn-ghost px-3 py-2 text-xs"
+            title="Download subtitles (.srt)"
+            aria-label="Download subtitles as an SRT file"
+          >
             <FileText size={15} /> <span className="hidden sm:inline">SRT</span>
           </button>
           <button onClick={exportVideo} disabled={isExporting || isGenerating} className="btn-primary px-3.5 py-2 text-xs sm:text-sm">
@@ -717,7 +741,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
         </div>
       </header>
 
-      <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
+      <main id="main-content" className="flex-1 min-h-0 flex flex-col lg:flex-row">
         {/* Stage */}
         <div className="flex flex-col min-h-0 h-[52dvh] lg:h-auto lg:flex-1 shrink-0">
           <div ref={stageRef} className="flex-1 min-h-0 relative flex items-center justify-center bg-[radial-gradient(ellipse_at_center,_#1a1a2a_0%,_#07070c_70%)]">
@@ -841,7 +865,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
             )}
           </div>
         </aside>
-      </div>
+      </main>
     </div>
   );
 }

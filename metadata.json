@@ -1,6 +1,6 @@
 {
   "name": "AutoCaption Studio",
-  "description": "Automatically generate stylish, animated captions for your videos using Gemini.",
+  "description": "Free AI video caption generator. Generate word-by-word animated captions in Hindi, Hinglish, English and 25+ languages, then export MP4 or SRT.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

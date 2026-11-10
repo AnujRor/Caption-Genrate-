@@ -1,0 +1,23 @@
+# AutoCaption Studio
+
+> Free AI video caption generator for Hindi, Hinglish, English and 25+ languages. Upload a video, get word-by-word animated captions, edit them in the browser, and export a captioned MP4 or an SRT subtitle file.
+
+## Main page
+- [AutoCaption Studio](https://caption-generator-9ch5.onrender.com/): Free AI video caption generator with word-level timing, animated caption styles and MP4/SRT export.
+
+## Features
+- [AI transcription](https://caption-generator-9ch5.onrender.com/#features): Whisper and Gemini generate word-by-word captions with accurate timing.
+- [Supported languages](https://caption-generator-9ch5.onrender.com/#languages): Hindi, Hinglish, English, Punjabi, Haryanvi, Bhojpuri, Marathi, Gujarati, Bengali, Urdu, Tamil, Telugu, Kannada, Malayalam, Assamese, Odia, Arabic, Spanish, French, German, Russian, Japanese, Korean, Chinese, Portuguese, Italian and Turkish.
+- [How it works](https://caption-generator-9ch5.onrender.com/#how-it-works): Upload, auto-generate captions, style and export in three steps.
+- [FAQ](https://caption-generator-9ch5.onrender.com/#faq): Answers about pricing, accuracy, privacy, formats and SRT downloads.
+
+## Use cases
+- Instagram Reels, YouTube Shorts and TikTok captions
+- Podcasts, interviews and talking-head videos
+- Online courses and tutorials
+- Ads, product demos and promotional videos
+
+## Notes
+- The app is free, requires no sign-up, and does not add a watermark.
+- MP4, MOV, WEBM, M4V, MKV, MP3, WAV and M4A files up to 1 GB are supported.
+- Exports: MP4 with burned-in captions, or a standard .srt subtitle file.

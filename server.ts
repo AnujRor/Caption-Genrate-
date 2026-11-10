@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import compression from "compression";
 import path from "path";
 import os from "os";
 import fs from "fs";
@@ -680,6 +681,15 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
   // Behind Render/Heroku-style proxies, trust the first hop so req.ip is the real visitor.
   app.set("trust proxy", 1);
+  app.disable("x-powered-by");
+
+  // Gzip text responses (HTML, JS, CSS, JSON) for faster first paint and better Core Web Vitals.
+  app.use(compression());
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    next();
+  });
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, engines: { groq: !!GROQ_KEY, gemini: !!GEMINI_KEY }, maxUploadMb: MAX_UPLOAD_MB });
@@ -833,10 +843,15 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath, { maxAge: "7d", index: false }));
-    // index.html must never be cached, otherwise browsers keep requesting deleted asset hashes after a deploy.
-    app.get("*", (_req, res) => {
+    // The app has a single indexable URL, so don't turn every unknown path into a
+    // duplicate copy of the home page (a soft 404 search engines would penalise).
+    app.get(["/", "/index.html"], (_req, res) => {
+      // index.html must never be cached, otherwise browsers keep requesting deleted asset hashes after a deploy.
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.sendFile(path.join(distPath, "index.html"));
+    });
+    app.use((_req, res) => {
+      res.status(404).sendFile(path.join(distPath, "404.html"));
     });
   }
 

@@ -1,0 +1,21 @@
+name: IndexNow
+
+# Instantly tell Bing, Yandex, Seznam and Naver that the site changed.
+# Run it from the Actions tab after a deploy (no local setup needed).
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: URL to submit (leave empty for the home page)
+        required: false
+        default: https://caption-generator-9ch5.onrender.com/
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/indexnow.mjs "${{ inputs.url }}"

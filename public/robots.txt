@@ -1,0 +1,25 @@
+# AutoCaption Studio — https://caption-generator-9ch5.onrender.com
+User-agent: *
+Allow: /
+Disallow: /api/
+
+# AI crawlers are welcome to read the public landing page.
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+Sitemap: https://caption-generator-9ch5.onrender.com/sitemap.xml
