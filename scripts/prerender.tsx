@@ -70,7 +70,7 @@ async function main() {
   await fs.writeFile(indexPath, output, 'utf8');
 
   // 4. Keep the crawler files on the same domain as the canonical URL.
-  const domainFiles = ['robots.txt', 'sitemap.xml'];
+  const domainFiles = ['robots.txt', 'sitemap.xml', 'guides/hindi-video-captions.html', 'guides/hinglish-captions.html'];
   for (const name of domainFiles) {
     await replaceDomain(path.join(distPath, name), DEFAULT_SITE_URL, SITE_URL);
   }

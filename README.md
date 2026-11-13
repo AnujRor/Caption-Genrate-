@@ -101,6 +101,7 @@ The server (`server.ts`) handles the heavy lifting: file upload, ffmpeg audio ex
 │   ├── robots.txt            # Crawler rules + sitemap reference
 │   ├── sitemap.xml           # Indexable URLs
 │   ├── sitemap.xsl           # Human-readable browser view of the sitemap
+│   ├── guides/               # Static long-form SEO guides (Hindi, Hinglish)
 │   ├── og-image.png          # 1200×630 social preview image
 │   ├── icon-192.png / icon-512.png / apple-touch-icon.png / favicon-32.png
 │   ├── favicon.svg           # Scalable app icon

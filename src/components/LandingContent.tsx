@@ -333,7 +333,7 @@ export function SiteFooter() {
           </p>
         </div>
 
-        <nav aria-label="Footer" className="flex gap-10">
+        <nav aria-label="Footer" className="flex flex-wrap gap-8 sm:gap-10">
           <div>
             <h2 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">Product</h2>
             <ul className="mt-2 space-y-1.5 text-xs text-zinc-500">
@@ -381,6 +381,22 @@ export function SiteFooter() {
               <li>
                 <a href="#use-cases" className="transition-colors hover:text-violet-300">
                   Online courses
+                </a>
+              </li>
+            </ul>
+          </div>
+
+          <div>
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">Guides</h2>
+            <ul className="mt-2 space-y-1.5 text-xs text-zinc-500">
+              <li>
+                <a href="/guides/hindi-video-captions.html" className="transition-colors hover:text-violet-300">
+                  Hindi captions
+                </a>
+              </li>
+              <li>
+                <a href="/guides/hinglish-captions.html" className="transition-colors hover:text-violet-300">
+                  Hinglish captions
                 </a>
               </li>
             </ul>
