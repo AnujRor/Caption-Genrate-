@@ -6,9 +6,27 @@ GitHub repo optimization, backlinks and the launch plan.
 
 - **Live URL:** https://caption-generator-9ch5.onrender.com
 - **Repo:** https://github.com/AnujRor/Caption-Genrate-
-- **Primary keywords:** `AI video caption generator`, `free caption generator`,
+- **Candidate search topics (not volume-validated):** `AI video caption generator`, `free caption generator`,
   `Hindi captions`, `Hinglish captions`, `auto subtitles`, `SRT generator`,
   `Instagram Reels captions`, `YouTube Shorts subtitles`
+
+## Current status and boundaries
+
+Already present in the repository: prerendered landing-page content, canonical and
+social metadata, two topic guides, `robots.txt`, an XML sitemap, a generated
+IndexNow key, and an IndexNow workflow. These technical assets do not prove that
+Google or Bing has indexed the pages.
+
+Still requires the site owner's accounts or publication approval: Search Console
+and Bing verification, GitHub About details, social posts, directory listings,
+community participation, and backlinks. None of those external changes are made
+by editing this repository. Do not buy links, mass-post, or claim a ranking result
+without measurement.
+
+In Search Console, submit
+`https://caption-generator-9ch5.onrender.com/sitemap.xml`, not the homepage URL.
+The sitemap's successful fetch and the site's indexed status must be confirmed
+in the owner's Search Console account.
 
 ---
 
@@ -28,7 +46,7 @@ Local verification:
 
 ```bash
 npm run build
-npm run seo:check     # must print "SEO check passed: 20/20 checks"
+npm run seo:check     # must print "SEO check passed" with no failed checks
 ```
 
 ---
@@ -36,8 +54,9 @@ npm run seo:check     # must print "SEO check passed: 20/20 checks"
 ## 2. Google Search Console
 
 1. Open <https://search.google.com/search-console> → **Add property**.
-2. Prefer **Domain** property (`caption-generator-9ch5.onrender.com`) if you can add a
-   DNS TXT record. Otherwise use **URL prefix** with the full `https://` URL.
+2. For the current Render hostname, use a **URL prefix** property with the full
+   `https://caption-generator-9ch5.onrender.com/` URL. Use a **Domain** property
+   only for a domain whose DNS records you control.
 3. Verify. With the URL-prefix method you can use the HTML tag option:
    - Get the `content="..."` value from Google.
    - Add it to the Render environment as `GOOGLE_SITE_VERIFICATION` (or
@@ -52,9 +71,10 @@ npm run seo:check     # must print "SEO check passed: 20/20 checks"
    "Discovered – currently not indexed" or "Crawled – currently not indexed"
    by improving content, not by resubmitting repeatedly.
 
-> Free Render instances sleep. If Googlebot hits a sleeping instance it gets a
-> slow first byte. Once real traffic starts, consider the paid instance or a
-> cron ping to keep it warm.
+> Free Render instances sleep and can respond slowly while waking. If crawl
+> failures continue, consider an always-on hosting plan or a custom domain and
+> hosting setup you control. Do not generate artificial ping traffic to disguise
+> availability problems.
 
 ## 3. Bing Webmaster Tools
 
@@ -63,8 +83,8 @@ npm run seo:check     # must print "SEO check passed: 20/20 checks"
    sitemap). Manual path uses `BING_SITE_VERIFICATION` /
    `VITE_BING_SITE_VERIFICATION`, injected as `msvalidate.01`.
 3. Submit `https://caption-generator-9ch5.onrender.com/sitemap.xml`.
-4. Bing also feeds **DuckDuckGo**, **Yahoo** and (partly) **ChatGPT search**, so
-   this step matters for AI visibility too.
+4. Treat Bing Webmaster Tools as its own search performance and crawlability
+   channel; do not assume a submission guarantees visibility in other services.
 
 ## 4. IndexNow (instant indexing)
 
@@ -90,9 +110,10 @@ setup required).
 
 ---
 
-## 5. GitHub repo optimization (free, high-value backlink)
+## 5. GitHub repo profile
 
-GitHub profile and repo pages rank well and pass real link equity.
+Complete the repository About fields so people can identify and find the project.
+This is useful for discovery, but a GitHub link is not a guaranteed ranking boost.
 
 ```bash
 gh auth login          # one time, choose GitHub.com → HTTPS → browser
@@ -125,18 +146,18 @@ or move domains.
 
 ### X / Twitter (thread)
 
-> 1/ I built a free AI caption generator for Hindi, Hinglish & 25+ languages.
+> 1/ AutoCaption Studio is a free AI caption generator for Hindi, Hinglish and
+> 25+ languages.
 >
 > Upload a video → it transcribes with word-level timestamps → you style the
 > captions → export MP4 or SRT. No editing skills, no watermark.
 >
 > {{URL}}
 >
-> 2/ Most caption tools are English-first. Hinglish ("aap kaise ho") and
-> Devanagari Hindi get butchered.
+> 2/ Choose Hindi for Devanagari captions or Hinglish for Hindi speech written
+> in Roman letters. Auto-detect is available when you are unsure.
 >
-> This one outputs both, plus Punjabi, Bhojpuri, Haryanvi, Tamil, Telugu,
-> Bengali, Arabic, Spanish…
+> The app also supports English and 25+ other languages.
 >
 > 3/ What's inside:
 > • Word-by-word timestamps
@@ -152,12 +173,10 @@ or move domains.
 
 ### LinkedIn
 
-> Captions are no longer optional — 80%+ of social video is watched on mute.
+> Need subtitles for a Hindi or Hinglish video? **AutoCaption Studio** creates
+> word-timed captions in the browser, ready to review and export.
 >
-> I kept seeing creators manually type subtitles for Hindi and Hinglish reels,
-> so I built a free tool that does it automatically: **AutoCaption Studio**.
->
-> • Upload MP4/MOV/MP3 → AI transcribes with word-by-word timing
+> • Upload MP4/MOV/WEBM → AI transcribes with word-by-word timing
 > • Supports Hindi, Hinglish and 25+ languages
 > • Style captions (karaoke, single-word, progressive) and export MP4 or SRT
 > • Works in the browser, no install, no watermark
@@ -172,11 +191,11 @@ or move domains.
 Read each subreddit's self-promotion rules first. Post as a builder sharing a
 free tool, not as an ad.
 
-> **Title:** I made a free caption generator that actually handles Hindi and Hinglish
+> **Title:** Free AI video caption generator for Hindi and Hinglish
 >
-> Every caption tool I tried turned "aap kaise ho" into nonsense or forced me to
-> type Devanagari by hand. So I built one that transcribes Hindi, Hinglish and
-> 25+ languages with word-level timestamps.
+> AutoCaption Studio creates word-timed captions for Hindi, Hinglish and 25+
+> languages. Choose Devanagari Hindi or Roman-script Hinglish, review the
+> transcript, and export a captioned MP4 or an SRT subtitle file.
 >
 > Flow: upload → auto-transcribe → pick a style (karaoke / one-word /
 > progressive) → export burned-in MP4 or .srt.
@@ -188,12 +207,12 @@ free tool, not as an ad.
 
 ### Dev.to / Hashnode (technical post)
 
-Title: **Building a Hindi/Hinglish AI caption generator with Gemini and FFmpeg**
+Title: **Inside a Hindi/Hinglish AI caption generator built with Whisper, Gemini and FFmpeg**
 
 Outline:
 
 1. Why English-first caption tools fail on Hinglish
-2. Pipeline: upload → FFmpeg 16 kHz WAV → Gemini word-level JSON → phrase builder
+2. Pipeline: upload → FFmpeg mono 16 kHz MP3 → Whisper or Gemini transcription → phrase builder
 3. Getting reliable word timestamps (prompt shape + validation)
 4. Rendering styled captions on canvas
 5. Burn-in vs SRT export
@@ -263,24 +282,15 @@ Avoid: paid link farms, PBNs, mass guest-post networks, comment spam, and
 
 ---
 
-## 8. Anchor text guidance
+## 8. Link guidance
 
-Natural profile beats exact-match repetition.
-
-| Anchor type | Example | Share |
-|-------------|---------|-------|
-| Branded | AutoCaption Studio | ~40% |
-| Naked URL | caption-generator-9ch5.onrender.com | ~25% |
-| Partial match | free AI caption generator for Hindi | ~20% |
-| Exact match | AI video caption generator | ~10% |
-| Generic | this tool, try it here | ~5% |
-
-Rules:
-
-- One link per post/article is enough.
-- Link to the page you are actually talking about.
-- No sitewide footer links from unrelated sites.
-- Never buy links; earn them by being useful in the thread.
+- Earn links by publishing useful, original material and participating where the
+  product is genuinely relevant; there is no safe target percentage for anchor text.
+- Use the brand name, page title, or a natural description that fits the sentence.
+- Link to the page that answers the reader's question; do not repeat exact-match
+  keywords or add unrelated sitewide footer links.
+- Follow each community's self-promotion rules. Never buy links or use automated
+  comment/post campaigns.
 
 ---
 
@@ -288,7 +298,7 @@ Rules:
 
 | Days | Action | Done when |
 |------|--------|-----------|
-| 1 | Deploy, run `npm run seo:check`, verify key file is live | 20/20 + key URL returns the key |
+| 1 | Deploy, run `npm run seo:check`, verify key file is live | All SEO checks pass + key URL returns the key |
 | 1 | `gh auth login`, run the `gh repo edit` command | Repo shows description, site, topics |
 | 2 | Google Search Console: verify + submit sitemap + request indexing | Sitemap status "Success" |
 | 2 | Bing Webmaster: import from GSC + submit sitemap | Site verified |
@@ -298,7 +308,7 @@ Rules:
 | 5 | LinkedIn + X launch posts | Both live |
 | 6–7 | Show IH + Reddit (rules permitting) | Posts live |
 | 8 | Product Hunt launch | Listing live with first comment |
-| 9–14 | Answer 5 Quora/Reddit questions helpfully | 5 answers with at most 2 links |
+| 9–14 | Answer relevant Quora/Reddit questions with complete, original help | Participate only where the product genuinely fits |
 | 15 | Add canonical URLs to Medium/Hashnode cross-posts | Canonicals set |
 | 16–21 | Submit to AlternativeTo + 3 quality directories | Live listings |
 | 22–28 | Publish a second article (e.g. "How to add Hindi subtitles to Reels") | Article live |

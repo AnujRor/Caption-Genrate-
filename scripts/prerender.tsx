@@ -2,7 +2,7 @@
  * Post-build SEO step.
  *
  * 1. Renders the landing page to static HTML so crawlers see the real H1/H2/H3
- *    content, FAQ answers and internal links without executing JavaScript.
+ *    content, FAQ answers, FAQPage schema and internal links without JavaScript.
  * 2. Rewrites the canonical domain in index.html, robots.txt and sitemap.xml
  *    when VITE_SITE_URL (or SITE_URL) is set at build time.
  * 3. Injects Google Search Console / Bing verification meta tags from env vars.
@@ -14,6 +14,7 @@ import path from 'node:path';
 import React from 'react';
 import { renderToString } from 'react-dom/server';
 import App from '../src/App';
+import { FAQS } from '../src/lib/seo';
 
 const DEFAULT_SITE_URL = 'https://caption-generator-9ch5.onrender.com';
 const SITE_URL = (process.env.VITE_SITE_URL || process.env.SITE_URL || DEFAULT_SITE_URL).replace(/\/+$/, '');
@@ -44,6 +45,31 @@ async function main() {
   // 1. Static landing-page HTML.
   const appHtml = renderToString(React.createElement(App));
   let output = template.replace(marker, `<div id="root">${appHtml}</div>`);
+
+  const faqMarker = '<!-- FAQ_JSON_LD -->';
+  if (!output.includes(faqMarker)) {
+    throw new Error(`Could not find "${faqMarker}" in ${indexPath}`);
+  }
+  const faqJsonLd = JSON.stringify(
+    {
+      '@context': 'https://schema.org',
+      '@type': 'FAQPage',
+      mainEntity: FAQS.map(({ question, answer }) => ({
+        '@type': 'Question',
+        name: question,
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: answer,
+        },
+      })),
+    },
+    null,
+    2
+  ).replace(/</g, '\\u003c');
+  output = output.replace(
+    faqMarker,
+    `<script type="application/ld+json">\n${faqJsonLd}\n    </script>`
+  );
 
   // 2. Canonical domain.
   if (SITE_URL !== DEFAULT_SITE_URL) {

@@ -33,7 +33,7 @@ const FEATURES = [
   {
     icon: Sparkles,
     title: 'AI transcription with word-level timing',
-    text: 'Whisper and Gemini detect every spoken word and sync each caption to the exact moment it is said — no manual timing needed.',
+    text: 'Whisper or Gemini creates word-level timestamps to align captions with speech. Review and edit the transcript before exporting.',
   },
   {
     icon: Languages,
@@ -66,12 +66,12 @@ const STEPS = [
   {
     icon: UploadCloud,
     title: 'Upload your video',
-    text: 'Open AutoCaption Studio and drop an MP4, MOV, WEBM, M4V or MKV file — or an MP3, WAV or M4A audio track. Videos up to 1 GB are supported.',
+    text: 'Open AutoCaption Studio and drop an MP4, MOV, WEBM, M4V or MKV video up to 1 GB. Very large or long clips may need trimming or compression before processing.',
   },
   {
     icon: Zap,
     title: 'Generate AI captions',
-    text: 'Keep Auto-detect on or pick the spoken language. Whisper and Gemini transcribe the audio with word-by-word timestamps in seconds.',
+    text: 'Keep Auto-detect on or pick the spoken language, then generate captions with word-by-word timing using Whisper or Gemini.',
   },
   {
     icon: Wand2,
@@ -94,7 +94,7 @@ const USE_CASES = [
   {
     icon: Mic,
     title: 'Podcasts and interviews',
-    text: 'Turn interviews and podcast clips into readable, shareable videos with speaker-ready subtitles in minutes.',
+    text: 'Turn interviews and podcast clips into readable, shareable videos with word-timed subtitles.',
   },
   {
     icon: GraduationCap,
@@ -151,8 +151,8 @@ export default function LandingContent({ onUpload, isImporting }: LandingContent
             Add subtitles to a video in 3 steps
           </h2>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-            No editing skills, no timeline setup and no sign-up. The whole caption workflow runs in your browser in
-            about two minutes.
+            No editing skills, timeline setup or sign-up required. Upload a video, generate and review its captions,
+            then export a captioned MP4 or SRT file.
           </p>
         </div>
 
@@ -301,7 +301,7 @@ export default function LandingContent({ onUpload, isImporting }: LandingContent
                 <ShieldCheck size={12} aria-hidden="true" /> Private by default
               </span>
               <span className="inline-flex items-center gap-1">
-                <Clock3 size={12} aria-hidden="true" /> Captions in seconds
+                <Clock3 size={12} aria-hidden="true" /> Word-by-word timing
               </span>
               <span className="inline-flex items-center gap-1">
                 <Sparkles size={12} aria-hidden="true" /> Powered by Whisper + Gemini
@@ -329,7 +329,7 @@ export function SiteFooter() {
           </div>
           <p className="mt-2 text-xs leading-relaxed text-zinc-500">
             Free AI video caption generator for Hindi, Hinglish and English creators. Make animated subtitles for
-            Instagram Reels, YouTube Shorts, TikTok, podcasts and courses in minutes.
+            Instagram Reels, YouTube Shorts, TikTok, podcasts and courses with word-timed subtitles.
           </p>
         </div>
 

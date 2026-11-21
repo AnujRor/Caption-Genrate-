@@ -109,8 +109,8 @@ The server (`server.ts`) handles the heavy lifting: file upload, ffmpeg audio ex
 │   ├── 404.html              # No-index not-found page
 │   └── llms.txt              # Summary for AI search engines
 ├── scripts/
-│   ├── prerender.tsx         # Renders landing HTML, injects verification tags + IndexNow key
-│   ├── check-seo.mjs         # 20-point SEO audit of dist/ (runs in CI)
+│   ├── prerender.tsx         # Renders landing HTML, generates FAQ schema and injects verification tags
+│   ├── check-seo.mjs         # SEO audit of built pages (runs in CI)
 │   ├── indexnow.mjs          # Instant indexing ping for Bing/Yandex/Seznam/Naver
 │   └── generate-seo-assets.ps1 # Regenerates OG image and icons
 ├── src/
@@ -228,12 +228,12 @@ The landing page ships with complete on-page SEO:
 | Area | Implementation |
 |------|----------------|
 | Title & description | Keyword-focused `<title>` (63 chars) and meta description (156 chars) in `index.html`, kept in sync by `src/lib/seo.ts` |
-| Keywords | `meta name="keywords"` plus natural keyword coverage in headings and body copy |
+| Search intent | Natural coverage of AI video captions, Hindi/Hinglish subtitles and MP4/SRT exports in titles, headings, body copy and guides |
 | Canonical | `<link rel="canonical">`, `hreflang` and matching Open Graph URLs |
 | Social | Open Graph + Twitter `summary_large_image` with a generated 1200×630 `og-image.png` |
 | Headings | Exactly one `<h1>`; section `<h2>`s; feature/step/language/FAQ `<h3>`s |
 | Structured data | `WebApplication`, `WebSite`, `Organization`, `FAQPage` and `HowTo` JSON-LD |
-| Content | Features, how-it-works, 28 languages, six use cases, seven FAQs, CTA and footer |
+| Content | Features, how-it-works, 28 languages, six use cases, eleven FAQs, CTA and footer |
 | Crawlers | `robots.txt`, `sitemap.xml`, `llms.txt`, `site.webmanifest`, semantic landmarks, skip link |
 | Performance | gzip compression, preconnect to Google Fonts, lazy-loaded editor chunk, lazy project thumbnails |
 | Rendering | `scripts/prerender.tsx` renders the landing page into `dist/index.html` at build time so crawlers get full HTML without running JS |
@@ -241,8 +241,8 @@ The landing page ships with complete on-page SEO:
 | Indexing | `npm run seo:indexnow` instantly notifies Bing/Yandex/Seznam/Naver after each deploy |
 | Errors | Unknown paths return a real `404` page instead of a soft-404 copy of the home page |
 
-Run `npm run seo:check` after `npm run build` to verify all 20 checks still pass;
-CI runs it on every push.
+Run `npm run seo:check` after `npm run build` to verify the SEO checks pass;
+CI runs the audit on every push.
 
 ### Off-page SEO
 

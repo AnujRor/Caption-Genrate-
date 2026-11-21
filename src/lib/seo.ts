@@ -13,22 +13,7 @@ export const SITE_NAME = 'AutoCaption Studio';
 export const DEFAULT_TITLE = 'Free AI Video Caption Generator — Hindi, Hinglish & English';
 
 export const DEFAULT_DESCRIPTION =
-  'Generate accurate animated captions for your videos free with AI. Word-by-word subtitles in Hindi, Hinglish, English & 25+ languages, export MP4 or SRT.';
-
-export const DEFAULT_KEYWORDS = [
-  'AI video caption generator',
-  'free caption generator',
-  'auto subtitles',
-  'Hindi captions',
-  'Hinglish captions',
-  'video subtitle generator',
-  'SRT generator',
-  'animated captions',
-  'Instagram Reels captions',
-  'YouTube Shorts subtitles',
-  'TikTok captions',
-  'add subtitles to video',
-];
+  'Generate AI video captions with word-by-word timing. Create Hindi, Hinglish, English and 25+ language subtitles, edit them, then export MP4 or SRT for free.';
 
 /** Languages shown on the landing page (kept in sync with server/scripts.ts). */
 export const LANGUAGES = {
@@ -86,7 +71,7 @@ export const FAQS: FaqItem[] = [
   {
     question: 'How accurate are the AI-generated captions?',
     answer:
-      'Captions are generated with word-level timestamps by Whisper and Gemini. Accuracy is highest with clear audio; you can click any caption in the editor to fix a word or adjust the sync before exporting.',
+      'Whisper or Gemini creates word-level timestamps depending on the language and service availability. Accuracy is highest with clear audio; you can edit words and timing before exporting.',
   },
   {
     question: 'Can I download subtitles as an SRT file?',
@@ -101,12 +86,32 @@ export const FAQS: FaqItem[] = [
   {
     question: 'What video formats and sizes are supported?',
     answer:
-      'You can upload MP4, MOV, WEBM, M4V and MKV videos or MP3, WAV and M4A audio up to 1 GB. The server extracts the audio for transcription and deletes temporary files after processing.',
+      'You can upload MP4, MOV, WEBM, M4V and MKV videos up to 1 GB. Very large or long videos may need trimming or compression to meet server processing limits.',
   },
   {
     question: 'Are my videos private?',
     answer:
       'Your video is only uploaded for transcription, and temporary files are deleted after processing. Projects are stored locally in your browser unless you choose optional cloud sync.',
+  },
+  {
+    question: 'How can I add subtitles to a video online for free?',
+    answer:
+      'Upload a video, choose its spoken language or Auto-detect, then generate captions. Review the transcript, style the captions, and export a captioned MP4 or download an SRT subtitle file. No sign-up or editing software is required.',
+  },
+  {
+    question: 'Can I make Hindi subtitles or Hinglish captions?',
+    answer:
+      'Yes. Choose Hindi for Devanagari subtitles or Hinglish for Hindi speech written in Roman letters. You can also choose Auto-detect when you are unsure which language is spoken.',
+  },
+  {
+    question: 'Can I edit AI-generated subtitles before exporting?',
+    answer:
+      'Yes. Click a caption in the editor to correct its words or adjust its timing, then export the updated video as an MP4 with burned-in captions or download an SRT subtitle file.',
+  },
+  {
+    question: 'Can I use the captions for YouTube Shorts, Instagram Reels and TikTok?',
+    answer:
+      "Yes. Export a captioned MP4 to upload directly, or use the SRT file with platforms and editors that support subtitle files. Check each platform's current upload settings for format requirements.",
   },
 ];
 
