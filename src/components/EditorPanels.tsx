@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Check, Pencil, Play, RefreshCw, Sparkles, Trash2, Wand2, X, Loader2, Globe, Languages } from 'lucide-react';
 import { Phrase, Project, StyleOptions } from '../types';
 import { FONTS, PRESETS } from '../lib/captionRenderer';
+import { EXPORT_FPS_OPTIONS, EXPORT_QUALITY_OPTIONS, ExportFps, ExportQuality, isExportFps, isExportQuality } from '../lib/exportSettings';
 import { cn, formatTime } from '../lib/utils';
 
 export const LANGUAGES: { value: string; label: string }[] = [
@@ -360,6 +361,73 @@ export function TimingPanel({
         </p>
         {!hasCaptions && <p className="text-[11px] text-amber-300/80 mt-2">Generate captions first.</p>}
       </div>
+    </div>
+  );
+}
+
+export function ExportSettingsPanel({
+  fps,
+  quality,
+  onFpsChange,
+  onQualityChange,
+  disabled,
+}: {
+  fps: ExportFps;
+  quality: ExportQuality;
+  onFpsChange: (fps: ExportFps) => void;
+  onQualityChange: (quality: ExportQuality) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="space-y-5">
+      <div className="panel p-4 space-y-4">
+        <div>
+          <label htmlFor="export-quality" className="block text-xs font-medium text-zinc-400 mb-2">
+            Video quality
+          </label>
+          <select
+            id="export-quality"
+            value={quality}
+            onChange={(e) => {
+              if (isExportQuality(e.target.value)) onQualityChange(e.target.value);
+            }}
+            className="field cursor-pointer"
+            disabled={disabled}
+          >
+            {EXPORT_QUALITY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label} — {option.description}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label htmlFor="export-fps" className="block text-xs font-medium text-zinc-400 mb-2">
+            Frame rate
+          </label>
+          <select
+            id="export-fps"
+            value={fps}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              if (isExportFps(value)) onFpsChange(value);
+            }}
+            className="field cursor-pointer"
+            disabled={disabled}
+          >
+            {EXPORT_FPS_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option} fps
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <p className="text-[11px] text-zinc-500 leading-relaxed">
+        Higher quality and frame rates create larger files and may take longer to export. 30 fps is a good choice for most videos.
+      </p>
     </div>
   );
 }

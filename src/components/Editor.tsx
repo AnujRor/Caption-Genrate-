@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Project, StyleOptions, DEFAULT_STYLES } from '../types';
-import { ChevronLeft, Download, FileText, Loader2, Pause, Play, Captions, Clock, Palette, CheckCircle2, AlertTriangle, X, Undo2, Redo2 } from 'lucide-react';
+import { ChevronLeft, Download, FileText, Loader2, Pause, Play, Captions, Clock, Palette, Settings2, CheckCircle2, AlertTriangle, X, Undo2, Redo2 } from 'lucide-react';
 import { cn, formatTime, loadPref, savePref } from '../lib/utils';
 import { resetVideo, saveProject } from '../lib/db';
 import { prepareUpload } from '../lib/audioExtractor';
 import { buildPhrases, downloadBlob, repairWords, retimePhrase, sanitizePhrases, toSrt } from '../lib/captionUtils';
 import { drawCaptions, ensureFontLoaded, findActive, FONTS } from '../lib/captionRenderer';
-import { CaptionsPanel, StylePanel, TimingPanel } from './EditorPanels';
+import { ExportFps, ExportQuality, getExportVideoBitrate, isExportFps, isExportQuality } from '../lib/exportSettings';
+import { CaptionsPanel, ExportSettingsPanel, StylePanel, TimingPanel } from './EditorPanels';
 
 interface EditorProps {
   project: Project;
@@ -93,7 +94,23 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
   const [videoSize, setVideoSize] = useState({ w: 9, h: 16 });
   const [isPlaying, setIsPlaying] = useState(false);
   const [activePhrase, setActivePhrase] = useState(-1);
-  const [tab, setTab] = useState<'captions' | 'timing' | 'style'>('captions');
+  const [tab, setTab] = useState<'captions' | 'timing' | 'style' | 'export'>('captions');
+  const [exportFps, setExportFpsState] = useState<ExportFps>(() => {
+    const saved = loadPref('exportFps', 30);
+    return isExportFps(saved) ? saved : 30;
+  });
+  const [exportQuality, setExportQualityState] = useState<ExportQuality>(() => {
+    const saved = loadPref('exportQuality', 'high');
+    return isExportQuality(saved) ? saved : 'high';
+  });
+  const setExportFps = (fps: ExportFps) => {
+    setExportFpsState(fps);
+    savePref('exportFps', fps);
+  };
+  const setExportQuality = (quality: ExportQuality) => {
+    setExportQualityState(quality);
+    savePref('exportQuality', quality);
+  };
   const [language, setLanguageState] = useState(() => loadPref('language', 'Auto-detect'));
   const [wordsPerLine, setWordsPerLineState] = useState(() => loadPref('wordsPerLine', 5));
   const setLanguage = (v: string) => {
@@ -545,6 +562,9 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
     let raf = 0;
     let drawTimer = 0;
     let watchdog = 0;
+    let recovering = false;
+    let recoveryAttempts = 0;
+    let waitingHandler: (() => void) | null = null;
     const stopDraw = () => {
       drawing = false;
       cancelAnimationFrame(raf);
@@ -566,7 +586,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
       canvas.width = W;
       canvas.height = H;
       const ctx = canvas.getContext('2d')!;
-      const stream = (canvas as any).captureStream(30) as MediaStream;
+      const stream = canvas.captureStream(exportFps);
 
       // Route the video's own audio into the recording (can only be wired once per element).
       if (!audioRef.current) {
@@ -583,7 +603,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
 
       const recorder = new MediaRecorder(stream, {
         mimeType,
-        videoBitsPerSecond: Math.round(Math.min(12e6, Math.max(3e6, W * H * 30 * 0.15))),
+        videoBitsPerSecond: getExportVideoBitrate(W, H, exportFps, exportQuality),
         audioBitsPerSecond: 160_000,
       });
       const chunks: Blob[] = [];
@@ -599,36 +619,85 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
 
       const duration = video.duration || 1;
       let lastProgressAt = Date.now();
-      let lastTime = 0;
+      let lastTime = video.currentTime;
+      let playbackStarted = false;
+      const recoverPlayback = async () => {
+        if (recovering || cancelled || video.ended) return;
+        recovering = true;
+        const resumeAt = video.currentTime;
+        const seekTo = Math.min(duration - 0.05, resumeAt + 0.1);
+        try {
+          if (video.error) throw new Error('The browser reported a video decoding error.');
+          if (seekTo <= resumeAt) throw new Error('The video cannot seek past the stalled frame.');
+          if (recorder.state === 'recording') recorder.pause();
+          video.pause();
+          await new Promise<void>((resolve, reject) => {
+            const finish = (error?: Error) => {
+              window.clearTimeout(timeout);
+              video.removeEventListener('seeked', onSeeked);
+              video.removeEventListener('error', onError);
+              if (error) reject(error);
+              else resolve();
+            };
+            const onSeeked = () => finish();
+            const onError = () => finish(new Error('The browser could not decode the next video frame.'));
+            const timeout = window.setTimeout(
+              () => finish(new Error('The browser timed out while seeking past a stalled frame.')),
+              5000
+            );
+            video.addEventListener('seeked', onSeeked);
+            video.addEventListener('error', onError);
+            video.currentTime = seekTo;
+          });
+          lastTime = video.currentTime;
+          if (cancelled) return;
+          await video.play();
+          if (recorder.state === 'paused') recorder.resume();
+          lastProgressAt = Date.now();
+        } catch (err) {
+          console.warn(`Video export recovery attempt ${recoveryAttempts} failed:`, err);
+        } finally {
+          recovering = false;
+        }
+      };
+      waitingHandler = () => {
+        if (!playbackStarted || video.ended) return;
+        lastProgressAt = Date.now();
+        if (recorder.state === 'recording') recorder.pause();
+      };
+      video.addEventListener('waiting', waitingHandler);
       const finished = new Promise<void>((resolve) => {
         exportCancel.current = () => {
           cancelled = true;
           resolve();
         };
         video.addEventListener('ended', () => resolve(), { once: true });
-        // Watchdog: if playback gets stuck, nudge it; if it stays stuck, finish with what was recorded.
+        // A small seek can reset a decoder that stopped advancing during export.
         watchdog = window.setInterval(() => {
           if (video.currentTime !== lastTime) {
             lastTime = video.currentTime;
             lastProgressAt = Date.now();
-          } else if (Date.now() - lastProgressAt > 20_000) {
+            recoveryAttempts = 0;
+            if (!recovering && recorder.state === 'paused') recorder.resume();
+          } else if (Date.now() - lastProgressAt > 15_000 && recoveryAttempts >= 3 && !recovering) {
             stalled = true;
             resolve();
-          } else if (Date.now() - lastProgressAt > 3_000 && !video.ended) {
-            video.play().catch(() => {});
+          } else if (Date.now() - lastProgressAt > 1_000 && recoveryAttempts < 3 && !recovering) {
+            recoveryAttempts++;
+            void recoverPlayback();
           }
           if (video.currentTime >= duration - 0.05) resolve();
-        }, 1000);
+        }, 250);
       });
       // Keep playing if the browser pauses the video mid-export (e.g. media key).
-      const keepPlaying = () => !cancelled && !video.ended && video.play().catch(() => {});
+      const keepPlaying = () => !cancelled && !recovering && !video.ended && video.play().catch(() => {});
       video.addEventListener('pause', keepPlaying);
 
       let lastPct = -1;
       let lastDrawAt = -Infinity;
       const draw = () => {
         const now = performance.now();
-        if (now - lastDrawAt >= 1000 / 30) {
+        if (now - lastDrawAt >= 1000 / exportFps) {
           lastDrawAt = now;
           ctx.drawImage(video, 0, 0, W, H);
           const cur = projectRef.current;
@@ -645,16 +714,18 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
         }
         // requestAnimationFrame stops in background tabs; fall back to a timer so the export keeps going.
         if (drawing) {
-          if (document.hidden) drawTimer = window.setTimeout(draw, 33);
+          if (document.hidden) drawTimer = window.setTimeout(draw, 1000 / exportFps);
           else raf = requestAnimationFrame(draw);
         }
       };
       draw();
       recorder.start(500);
       await video.play();
+      playbackStarted = true;
 
       await finished;
       video.removeEventListener('pause', keepPlaying);
+      video.removeEventListener('waiting', waitingHandler);
       stopDraw();
       video.pause();
       if (recorder.state !== 'inactive') recorder.stop();
@@ -662,13 +733,13 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
       stream.getVideoTracks().forEach((t) => t.stop());
 
       if (!cancelled && chunks.length) {
-        const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
-        downloadBlob(new Blob(chunks, { type: mimeType.split(';')[0] }), `${p.name}_captioned.${ext}`);
-        setNotice(
-          stalled
-            ? { kind: 'error', text: `Video playback got stuck, so the ${ext.toUpperCase()} was saved up to that point. Keep this tab visible and try exporting again for the full video.` }
-            : { kind: 'success', text: `Export complete — your ${ext.toUpperCase()} is downloading.` }
-        );
+        if (stalled) {
+          setNotice({ kind: 'error', text: 'Video playback stopped and could not be recovered. No incomplete video was downloaded. Please try converting the source video to MP4 and export again.' });
+        } else {
+          const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+          downloadBlob(new Blob(chunks, { type: mimeType.split(';')[0] }), `${p.name}_captioned.${ext}`);
+          setNotice({ kind: 'success', text: `Export complete — your ${ext.toUpperCase()} is downloading.` });
+        }
       } else if (cancelled) {
         setNotice({ kind: 'info', text: 'Export cancelled.' });
       }
@@ -677,6 +748,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
       setNotice({ kind: 'error', text: 'Export failed: ' + ((err as Error).message || 'unknown error') });
     } finally {
       stopDraw();
+      if (waitingHandler) video.removeEventListener('waiting', waitingHandler);
       exportCancel.current = null;
       setExportProgress(null);
       video.currentTime = 0;
@@ -812,6 +884,7 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
                 { id: 'captions', label: 'Captions', icon: Captions },
                 { id: 'timing', label: 'Timing', icon: Clock },
                 { id: 'style', label: 'Style', icon: Palette },
+                { id: 'export', label: 'Export', icon: Settings2 },
               ] as const).map(({ id, label, icon: Icon }) => (
                 <button
                   key={id}
@@ -867,6 +940,15 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
             )}
             {tab === 'style' && (
               <StylePanel styles={project.styles} onStyle={updateStyle} onPreset={(s) => commit((p) => ({ ...p, styles: { ...p.styles, ...s } }))} />
+            )}
+            {tab === 'export' && (
+              <ExportSettingsPanel
+                fps={exportFps}
+                quality={exportQuality}
+                onFpsChange={setExportFps}
+                onQualityChange={setExportQuality}
+                disabled={isExporting}
+              />
             )}
           </div>
         </aside>
