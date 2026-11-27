@@ -625,18 +625,23 @@ export default function Editor({ project: initialProject, onBack }: EditorProps)
       video.addEventListener('pause', keepPlaying);
 
       let lastPct = -1;
+      let lastDrawAt = -Infinity;
       const draw = () => {
-        ctx.drawImage(video, 0, 0, W, H);
-        const cur = projectRef.current;
-        try {
-          drawCaptions(ctx, W, H, video.currentTime, cur.phrases, cur.styles);
-        } catch (err) {
-          console.error('Caption render error during export:', err);
-        }
-        const pct = Math.min(99, Math.floor((video.currentTime / duration) * 100));
-        if (pct !== lastPct) {
-          lastPct = pct;
-          setExportProgress(pct);
+        const now = performance.now();
+        if (now - lastDrawAt >= 1000 / 30) {
+          lastDrawAt = now;
+          ctx.drawImage(video, 0, 0, W, H);
+          const cur = projectRef.current;
+          try {
+            drawCaptions(ctx, W, H, video.currentTime, cur.phrases, cur.styles);
+          } catch (err) {
+            console.error('Caption render error during export:', err);
+          }
+          const pct = Math.min(99, Math.floor((video.currentTime / duration) * 100));
+          if (pct !== lastPct) {
+            lastPct = pct;
+            setExportProgress(pct);
+          }
         }
         // requestAnimationFrame stops in background tabs; fall back to a timer so the export keeps going.
         if (drawing) {
